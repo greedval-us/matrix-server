@@ -1,0 +1,196 @@
+name: matrix
+
+x-mysql-environment: &mysql-environment
+  MATRIX_MYSQL_HOST: mysql
+  MATRIX_MYSQL_PORT: "3306"
+  MATRIX_MYSQL_USER: ${MATRIX_MYSQL_USER:-matrix}
+  MATRIX_MYSQL_PASSWORD: ${MATRIX_MYSQL_PASSWORD:?Set MATRIX_MYSQL_PASSWORD}
+  MATRIX_MYSQL_DATABASE: matrix
+
+x-api-image: &api-image
+  image: matrix-api:local
+  build:
+    context: .
+    target: api
+
+x-manticore-image: &manticore-image
+  image: matrix-manticore:29.9.0-local
+  build:
+    context: .
+    target: manticore
+
+x-manticore-environment: &manticore-environment
+  MANTICORE_DATA_DIR: /var/lib/manticore
+  MANTICORE_CONFIG: /var/lib/manticore/config/manticore.conf
+  MANTICORE_PID_FILE: /var/lib/manticore/runtime/searchd.pid
+  MANTICORE_LISTEN_HOST: 0.0.0.0
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: matrix
+      MYSQL_USER: ${MATRIX_MYSQL_USER:-matrix}
+      MYSQL_PASSWORD: ${MATRIX_MYSQL_PASSWORD:?Set MATRIX_MYSQL_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --protocol=TCP --host=127.0.0.1 --user=\"$$MYSQL_USER\" --database=\"$$MYSQL_DATABASE\" --execute='SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  migrate:
+    <<: *api-image
+    restart: "no"
+    command: ["node", "scripts/migrate.mjs"]
+    environment: *mysql-environment
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [backend]
+
+  catalog-copy:
+    <<: *api-image
+    profiles: [tools]
+    restart: "no"
+    command: ["node", "scripts/copy_catalog.mjs"]
+    environment:
+      <<: *mysql-environment
+      SOURCE_MYSQL_HOST: ${SOURCE_MYSQL_HOST:?Set SOURCE_MYSQL_HOST for explicit source jobs}
+      SOURCE_MYSQL_PORT: ${SOURCE_MYSQL_PORT:-3306}
+      SOURCE_MYSQL_USER: ${SOURCE_MYSQL_USER:-}
+      SOURCE_MYSQL_PASSWORD: ${SOURCE_MYSQL_PASSWORD:-}
+      SOURCE_MYSQL_DATABASE: ${SOURCE_MYSQL_DATABASE:-source_data}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend, source]
+
+  manticore:
+    <<: *manticore-image
+    restart: unless-stopped
+    environment: *manticore-environment
+    volumes:
+      - manticore-config:/var/lib/manticore/config
+      - manticore-state:/var/lib/manticore/state
+      - manticore-indexes:/var/lib/manticore/indexes
+      - manticore-runtime:/var/lib/manticore/runtime
+      - manticore-log:/var/lib/manticore/log
+    networks: [backend]
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9308/sql?mode=raw&query=SHOW%20TABLES', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 60s
+
+  api:
+    <<: *api-image
+    restart: unless-stopped
+    init: true
+    environment:
+      <<: *mysql-environment
+      MATRIX_MODULES: search,catalog,workspace,records
+      MATRIX_RECORDS_FILE_DIR: /var/lib/matrix/files
+      MATRIX_API_KEY: ${MATRIX_API_KEY:?Set MATRIX_API_KEY}
+      MATRIX_ADMIN_API_KEY: ${MATRIX_ADMIN_API_KEY:?Set a separate MATRIX_ADMIN_API_KEY}
+      MATRIX_GRPC_HOST: 0.0.0.0
+      MATRIX_GRPC_PORT: "50051"
+      MATRIX_GRPC_TLS_CERT: ${MATRIX_GRPC_TLS_CERT:-}
+      MATRIX_GRPC_TLS_KEY: ${MATRIX_GRPC_TLS_KEY:-}
+      MANTICORE_URL: http://manticore:9308
+      MANTICORE_TABLE: matrix_records
+      MANTICORE_INDEX_STATE: /var/lib/manticore/state/indexer.json
+      MATRIX_DATABASE_CATALOG: /var/lib/manticore/state/database-catalog.json
+      MATRIX_SEARCH_PAGE_SIZE: ${MATRIX_SEARCH_PAGE_SIZE:-1000}
+      MATRIX_MAX_QUERY_TIME_MS: ${MATRIX_MAX_QUERY_TIME_MS:-5000}
+      MATRIX_MAX_CONCURRENT_SEARCHES: ${MATRIX_MAX_CONCURRENT_SEARCHES:-16}
+    ports:
+      - "${MATRIX_BIND_HOST:-127.0.0.1}:${MATRIX_PUBLISHED_PORT:-50051}:50051"
+    volumes:
+      - manticore-state:/var/lib/manticore/state:ro
+      - control-files:/var/lib/matrix/files
+      - type: bind
+        source: ${MATRIX_TLS_DIR:-./docker/tls}
+        target: /run/matrix/tls
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      manticore:
+        condition: service_healthy
+    networks: [backend, edge]
+    healthcheck:
+      # Transport liveness; authenticated gRPC is checked during deployment.
+      test: ["CMD", "node", "-e", "const s=require('node:net').connect(50051,'127.0.0.1');s.setTimeout(3000);s.on('connect',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  indexer:
+    <<: *manticore-image
+    profiles: [indexing]
+    restart: "no"
+    init: true
+    command: ["python3", "/app/scripts/build_manticore_indexes.py"]
+    environment:
+      <<: *manticore-environment
+      MYSQL_HOST: ${SOURCE_MYSQL_HOST:?Set SOURCE_MYSQL_HOST for explicit source jobs}
+      MYSQL_PORT: ${SOURCE_MYSQL_PORT:-3306}
+      MYSQL_USER: ${SOURCE_MYSQL_USER:-}
+      MYSQL_PASSWORD: ${SOURCE_MYSQL_PASSWORD:-}
+      MYSQL_DATABASE: ${SOURCE_MYSQL_DATABASE:-source_data}
+      CATALOG_MYSQL_HOST: mysql
+      CATALOG_MYSQL_PORT: "3306"
+      CATALOG_MYSQL_USER: ${MATRIX_MYSQL_USER:-matrix}
+      CATALOG_MYSQL_PASSWORD: ${MATRIX_MYSQL_PASSWORD:?Set MATRIX_MYSQL_PASSWORD}
+      CATALOG_MYSQL_DATABASE: matrix
+      MANTICORE_RELOAD_URL: http://manticore:9308
+      MANTICORE_ROWS_PER_SHARD: ${MANTICORE_ROWS_PER_SHARD:-40000000}
+      MANTICORE_SOURCE_CHUNK_ROWS: ${MANTICORE_SOURCE_CHUNK_ROWS:-20000000}
+      MANTICORE_RANGE_STEP: ${MANTICORE_RANGE_STEP:-500000}
+      MANTICORE_INDEXER_MEM_LIMIT: ${MANTICORE_INDEXER_MEM_LIMIT:-2047M}
+    volumes:
+      - manticore-config:/var/lib/manticore/config
+      - manticore-state:/var/lib/manticore/state
+      - manticore-indexes:/var/lib/manticore/indexes
+      - manticore-log:/var/lib/manticore/log
+      - manticore-private:/var/lib/manticore/private
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      manticore:
+        condition: service_healthy
+    networks: [backend, source]
+
+networks:
+  backend:
+    internal: true
+  # A gateway network is needed for Docker to publish the API's host port.
+  edge: {}
+  # Only explicit indexer/catalogue-copy jobs can reach external source MariaDB.
+  source: {}
+
+volumes:
+  mysql-data:
+  control-files:
+  manticore-config:
+  manticore-state:
+  manticore-indexes:
+  manticore-runtime:
+  manticore-log:
+  manticore-private:

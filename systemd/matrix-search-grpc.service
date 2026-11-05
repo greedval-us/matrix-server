@@ -1,0 +1,22 @@
+[Unit]
+Description=Matrix gRPC search API
+After=network-online.target manticore.service
+Wants=network-online.target
+Requires=manticore.service
+
+[Service]
+Type=simple
+User=matrix
+Group=matrix
+WorkingDirectory=/opt/matrix
+EnvironmentFile=/etc/matrix-search/grpc.env
+ExecStart=/usr/bin/node /opt/matrix/node/main.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

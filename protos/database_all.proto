@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package database_all;
+
+message SearchRequestDA {
+  string request = 1;
+}
+
+message DataBaseDA {
+  string name_table = 1;
+  string name = 2;
+  string info = 3;
+  string country = 4;
+  string access_level = 5;
+  string count = 6;
+  string search_mail = 7;
+  string search_fio = 8;
+  string search_number = 9;
+  string search_telegram = 10;
+  string search_passport = 11;
+  string search_snils = 12;
+  string search_inn = 13;
+  string search_imei = 14;
+  string search_imsi = 15;
+  string search_facebook = 16;
+  string search_vk = 17;
+  string search_grz = 18;
+  string search_vin = 19;
+  string type = 20;
+  string trust = 21;
+  string updated_at = 22;
+  string created_at = 23;
+  string relevance_date = 24;
+}
+
+service DatabaseAll {
+  rpc StreamDatabaseAll(SearchRequestDA) returns (stream DataBaseDA);
+}

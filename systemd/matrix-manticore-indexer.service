@@ -1,0 +1,26 @@
+[Unit]
+Description=Matrix resumable MariaDB to Manticore indexer
+After=network-online.target mariadb.service manticore.service
+Wants=network-online.target
+Requires=mariadb.service manticore.service
+
+[Service]
+Type=simple
+User=manticore
+Group=manticore
+WorkingDirectory=/usr/local/lib/matrix-search
+EnvironmentFile=/etc/matrix-search/indexer.env
+ExecStart=/usr/bin/python3 /usr/local/lib/matrix-search/build_manticore_indexes.py
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+KillSignal=SIGTERM
+LimitNOFILE=65535
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

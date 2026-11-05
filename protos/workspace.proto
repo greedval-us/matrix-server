@@ -1,0 +1,18 @@
+syntax = "proto3";
+package matrix.workspace.v1;
+
+// resource is a registered operational resource, never an arbitrary SQL table.
+service Workspace {
+  rpc ListRows(ListRowsRequest) returns (Rows);
+  rpc GetRow(RowRequest) returns (Row);
+  rpc CreateRow(CreateRowRequest) returns (Row);
+  rpc UpdateRow(UpdateRowRequest) returns (Row);
+  rpc DeleteRow(RowRequest) returns (DeleteResponse);
+}
+message Row { string id = 1; map<string,string> values = 2; }
+message Rows { repeated Row rows = 1; string total = 2; }
+message ListRowsRequest { string resource = 1; uint32 limit = 2; uint32 offset = 3; }
+message RowRequest { string resource = 1; string id = 2; }
+message CreateRowRequest { string resource = 1; map<string,string> values = 2; }
+message UpdateRowRequest { string resource = 1; string id = 2; map<string,string> values = 3; }
+message DeleteResponse { bool deleted = 1; }

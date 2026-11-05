@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package base_search;
+
+message SearchRequest {
+  string number = 1;
+  string mail = 2;
+  string snils = 3;
+  string inn = 4;
+  string passport = 5;
+  string fio = 6;
+  string date_of_birth = 7;
+  string telegram = 8;
+  string vk = 9;
+  string facebook = 10;
+  string imsi = 11;
+  string imei = 12;
+  string grz = 13;
+  string vin = 14;
+  int32 limit = 15;
+}
+
+message DataBase {
+  string name_table = 1;
+  string name = 2;
+  string info = 3;
+  string type = 4;
+  string country = 5;
+  string count = 6;
+  string relevance_date = 7;
+  string trust = 8;
+}
+
+message ObjectData {
+  string source_name = 1;
+  map<string,string> fields = 2;
+}
+
+message GroupedItem {
+  string value = 1;
+  int32 count = 2;
+}
+
+message AddSerachItem {
+  string key = 1;
+  string value = 2;
+}
+
+message ObjectGrouped {
+  string key = 1;
+  repeated GroupedItem item = 2;
+}
+
+message ObjectAddSearch {
+  repeated AddSerachItem item = 1;
+}
+
+message SearchMeta {
+  int64 total_hits = 1;
+  int64 returned_hits = 2;
+  int32 indexed_shards = 3;
+  int32 total_shards = 4;
+  bool partial = 5;
+  double took_ms = 6;
+}
+
+message IndexStatusRequest {}
+
+message IndexStatusResponse {
+  string status = 1;
+  int32 indexed_shards = 2;
+  int32 total_shards = 3;
+  int32 current_shard = 4;
+  double progress_percent = 5;
+  string updated_at = 6;
+}
+
+message SearchResult {
+  oneof result {
+    DataBase object_data_base = 1;
+    ObjectData object_data = 2;
+    ObjectGrouped object_grouped = 3;
+    ObjectAddSearch object_add_search = 4;
+    SearchMeta meta = 5;
+  }
+}
+
+service BaseSearches {
+  rpc StreamSearch(SearchRequest) returns (stream SearchResult);
+  rpc GetIndexStatus(IndexStatusRequest) returns (IndexStatusResponse);
+}

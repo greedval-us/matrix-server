@@ -1,0 +1,35 @@
+syntax = "proto3";
+package matrix.records.v1;
+
+service Records {
+  rpc GetCapabilities(Empty) returns (Capabilities);
+  rpc ListRecords(ListRequest) returns (RecordPage);
+  rpc CreateRecord(CreateRequest) returns (Record);
+  rpc UpdateRecord(UpdateRequest) returns (Record);
+  rpc DeleteRecord(RecordId) returns (Deleted);
+  // A batch is published atomically. Each file starts with one header and is
+  // followed by data chunks totalling exactly the declared size.
+  rpc UploadFiles(stream UploadChunk) returns (Files);
+  rpc DownloadFile(FileReference) returns (stream DownloadChunk);
+  rpc RemoveFile(FileReference) returns (Deleted);
+}
+message Empty {}
+message Capabilities {
+  bool available = 1; bool list = 2; bool upload = 3; bool download = 4;
+  bool remove = 5; string message = 6;
+  bool create = 7; bool update = 8; bool delete = 9;
+}
+message Column { string key = 1; string label = 2; string type = 3; bool sortable = 4; }
+message File { string id = 1; string name = 2; uint64 size = 3; string mime_type = 4; }
+message Files { repeated File files = 1; }
+message Record { string id = 1; map<string,string> values = 2; repeated File files = 3; }
+message RecordPage { repeated Column columns = 1; repeated Record rows = 2; uint64 total = 3; }
+message ListRequest { string query = 1; string sort_key = 2; string sort_direction = 3; uint32 page = 4; uint32 page_size = 5; }
+message RecordId { string id = 1; }
+message CreateRequest { map<string,string> values = 1; }
+message UpdateRequest { string id = 1; map<string,string> values = 2; }
+message Deleted { bool deleted = 1; }
+message FileReference { string row_id = 1; string file_id = 2; }
+message UploadHeader { string row_id = 1; string name = 2; uint64 size = 3; string mime_type = 4; }
+message UploadChunk { oneof chunk { UploadHeader header = 1; bytes data = 2; } }
+message DownloadChunk { oneof chunk { File file = 1; bytes data = 2; } }

@@ -1,0 +1,21 @@
+{
+  "name": "matrix-search-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node node/main.mjs",
+    "check": "node scripts/check_grpc.mjs",
+    "migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
+    "catalog:copy": "node --env-file-if-exists=.env scripts/copy_catalog.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.13.4",
+    "@grpc/proto-loader": "^0.7.15",
+    "mysql2": "3.24.6"
+  }
+}
