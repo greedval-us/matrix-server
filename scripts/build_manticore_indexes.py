@@ -27,6 +27,7 @@ CATALOG_FIELDS = (
     "search_grz", "search_vin", "updated_at", "created_at",
 )
 BINARY_TYPES = {"binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob"}
+INTEGER_TYPES = {"tinyint", "smallint", "mediumint", "int", "integer", "bigint"}
 INDEX_SCHEMA_VERSION = 3
 DOCUMENT_ID_SHIFT = 32
 MAX_SOURCE_ROW_ID = (1 << DOCUMENT_ID_SHIFT) - 1
@@ -193,18 +194,44 @@ def query_json_rows(settings: dict, sql: str) -> list[dict]:
     return rows
 
 
-def discover_plan(settings: dict) -> dict:
+def read_catalog(settings: dict) -> list[dict]:
     catalog_pairs = ",".join(
         f"{quote_sql_string(field)},{quote_identifier(field)}"
         for field in CATALOG_FIELDS
     )
-    catalog = query_json_rows(
+    return query_json_rows(
         settings.get("catalog_connection", settings),
         f"SELECT JSON_OBJECT({catalog_pairs}) "
         f"FROM {quote_identifier(settings['catalog_table'])} ORDER BY id",
     )
-    if not catalog:
-        raise RuntimeError("The database catalog is empty")
+
+
+def catalog_identities(catalog: list[dict]) -> tuple[dict, dict]:
+    by_id, by_table = {}, {}
+    for row in catalog:
+        try:
+            database_id = int(row["id"])
+            table_name = str(row["name_table"])
+            quote_identifier(table_name)
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("Invalid catalogue identity") from error
+        if not 0 < database_id <= MAX_SOURCE_ROW_ID:
+            raise RuntimeError("Catalogue ID exceeds the document-id allocation")
+        if database_id in by_id or table_name in by_table:
+            raise RuntimeError("Duplicate catalogue ID or source table name")
+        by_id[database_id], by_table[table_name] = table_name, database_id
+    return by_id, by_table
+
+
+def plan_signature(databases: list[dict], shards: list[dict]) -> str:
+    payload = json.dumps({"databases": databases, "shards": shards}, ensure_ascii=False,
+                         sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def discover_plan(settings: dict, catalog_rows: list[dict] | None = None) -> dict:
+    catalog = read_catalog(settings) if catalog_rows is None else catalog_rows
+    catalog_identities(catalog)
 
     # Enumerate only explicitly catalogued source tables, always on the configured
     # source connection. Operational tables are never a source of row data.
@@ -217,27 +244,19 @@ def discover_plan(settings: dict) -> dict:
         settings,
         "SELECT JSON_OBJECT("
         "'table_name',TABLE_NAME,'column_name',COLUMN_NAME,'data_type',DATA_TYPE,"
-        "'ordinal_position',ORDINAL_POSITION) "
+        "'ordinal_position',ORDINAL_POSITION,'is_nullable',IS_NULLABLE) "
         "FROM information_schema.COLUMNS "
         f"WHERE TABLE_SCHEMA={quote_sql_string(settings['mysql_database'])} "
         f"AND TABLE_NAME IN ({allowed_tables}) "
         "ORDER BY TABLE_NAME,ORDINAL_POSITION",
-    )
-    table_stats = query_json_rows(
-        settings,
-        "SELECT JSON_OBJECT('table_name',TABLE_NAME,'max_id',"
-        "GREATEST(COALESCE(AUTO_INCREMENT,1)-1,0)) "
-        "FROM information_schema.TABLES "
-        f"WHERE TABLE_SCHEMA={quote_sql_string(settings['mysql_database'])} "
-        f"AND TABLE_NAME IN ({allowed_tables})",
-    )
+    ) if table_names else []
     columns_by_table = {}
     for column in columns:
         columns_by_table.setdefault(column["table_name"], []).append({
             "name": column["column_name"],
             "data_type": column["data_type"],
+            "is_nullable": column.get("is_nullable"),
         })
-    max_ids = {row["table_name"]: int(row["max_id"] or 0) for row in table_stats}
 
     databases = []
     segments = []
@@ -251,9 +270,21 @@ def discover_plan(settings: dict) -> dict:
         table_columns = columns_by_table.get(table_name)
         if not table_columns:
             raise RuntimeError(f"Catalog table does not exist: {table_name}")
-        if not any(column["name"].lower() == "id" for column in table_columns):
+        id_column = next((column for column in table_columns if column["name"].lower() == "id"), None)
+        if id_column is None:
             raise RuntimeError(f"Source table has no id column: {table_name}")
-        max_id = max_ids.get(table_name, 0)
+        if id_column["data_type"].lower() not in INTEGER_TYPES or id_column["is_nullable"] != "NO":
+            raise RuntimeError(f"Source table must have a non-null integer id: {table_name}")
+        # Imported immutable tables can have explicit IDs without AUTO_INCREMENT.
+        # Only new tables reach discovery, so old source tables are never scanned.
+        bounds = query_json_rows(settings,
+            "SELECT JSON_OBJECT('max_id',COALESCE(MAX(`id`),0),'min_id',MIN(`id`)) "
+            f"FROM {quote_identifier(table_name)}")
+        if len(bounds) != 1 or "max_id" not in bounds[0]:
+            raise RuntimeError(f"Cannot read source row-id bounds: {table_name}")
+        max_id = int(bounds[0]["max_id"] or 0)
+        if bounds[0].get("min_id") is not None and int(bounds[0]["min_id"]) <= 0:
+            raise RuntimeError(f"Source table must use positive row IDs: {table_name}")
         if max_id > MAX_SOURCE_ROW_ID:
             raise RuntimeError(
                 f"Source table {table_name} exceeds the 32-bit row-id allocation: {max_id}"
@@ -284,16 +315,10 @@ def discover_plan(settings: dict) -> dict:
     if current_segments:
         shards.append({"id_span": current_span, "segments": current_segments})
 
-    signature_payload = json.dumps(
-        {"databases": databases, "shards": shards},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     return {
         "schema_version": INDEX_SCHEMA_VERSION,
         "created_at": now(),
-        "signature": hashlib.sha256(signature_payload.encode("utf-8")).hexdigest(),
+        "signature": plan_signature(databases, shards),
         "databases": databases,
         "shards": shards,
     }
@@ -315,47 +340,109 @@ def write_catalog(plan: dict, path: Path) -> None:
     )
 
 
-def load_or_create_plan(settings: dict) -> dict:
+def extend_plan(settings: dict, plan: dict) -> dict:
+    catalog = read_catalog(settings)
+    live_ids, _ = catalog_identities(catalog)
+    known_ids, known_tables = catalog_identities(plan["databases"])
+    for database_id, table_name in live_ids.items():
+        if database_id in known_ids and known_ids[database_id] != table_name:
+            raise RuntimeError("Cannot reuse an indexed catalogue ID for a different table")
+        if table_name in known_tables and known_tables[table_name] != database_id:
+            raise RuntimeError("Cannot register an indexed source table under a different ID")
+    added = [row for row in catalog if int(row["id"]) not in known_ids]
+    if not added:
+        return plan
+    addition = discover_plan(settings, added)
+    # Never refill even a partially occupied old shard. Its files may be live.
+    databases = plan["databases"] + addition["databases"]
+    shards = plan["shards"] + addition["shards"]
+    return {
+        **plan,
+        "updated_at": now(),
+        "databases": databases,
+        "shards": shards,
+        "signature": plan_signature(databases, shards),
+        "predecessors": plan.get("predecessors", []) + [{
+            "signature": plan["signature"], "shard_count": len(plan["shards"]),
+            "database_count": len(plan["databases"]),
+        }],
+    }
+
+
+def load_or_create_plan(settings: dict, *, refresh: bool = False) -> dict:
+    changed = False
     try:
         plan = json.loads(settings["plan_path"].read_text(encoding="utf-8"))
     except FileNotFoundError:
         plan = discover_plan(settings)
-        atomic_write(
-            settings["plan_path"],
-            json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
-            0o644,
-        )
+        changed = True
     except (OSError, ValueError, TypeError) as error:
         raise RuntimeError(f"Cannot read index plan: {error}") from error
     if plan.get("schema_version") != INDEX_SCHEMA_VERSION:
         raise RuntimeError("Indexer schema changed; run once with --clean to build direct row indexes")
+    if refresh and not changed:
+        extended = extend_plan(settings, plan)
+        changed = extended is not plan
+        plan = extended
+    if changed:
+        # The old checkpoint is still valid against the recorded immutable prefix
+        # if the process stops before writing its new signature.
+        atomic_write(settings["plan_path"], json.dumps(plan, ensure_ascii=False, indent=2) + "\n", 0o644)
     write_catalog(plan, settings["catalog_path"])
     return plan
 
 
 def load_state(path: Path, plan: dict) -> dict:
+    exists = True
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
+        exists = False
         state = {}
     except (OSError, ValueError, TypeError) as error:
         raise RuntimeError(f"Cannot read index checkpoint: {error}") from error
+    if not isinstance(state, dict) or (exists and not state):
+        raise RuntimeError("Invalid index checkpoint; restore its matching backup")
+    required = {"schema_version", "plan_signature", "total_shards", "completed_shards", "current_shard", "status"}
+    if exists and not required.issubset(state):
+        raise RuntimeError("Incomplete index checkpoint; restore its matching backup")
     if state and state.get("schema_version") != INDEX_SCHEMA_VERSION:
         raise RuntimeError("Indexer schema changed; run once with --clean to build direct row indexes")
-    if state and state.get("plan_signature") != plan["signature"]:
-        raise RuntimeError("Index plan changed; keep the existing plan or start again with --clean")
     total_shards = len(plan["shards"])
+    previous_total = total_shards
+    if state and state.get("plan_signature") != plan["signature"]:
+        predecessor = next((item for item in plan.get("predecessors", [])
+                            if item["signature"] == state.get("plan_signature")), None)
+        if predecessor is None:
+            raise RuntimeError("Index plan/checkpoint mismatch; restore a matching backup")
+        previous_total = predecessor["shard_count"]
+        database_count = predecessor["database_count"]
+        if (type(previous_total) is not int or not 0 <= previous_total <= total_shards
+                or type(database_count) is not int or not 0 <= database_count <= len(plan["databases"])
+                or plan_signature(plan["databases"][:database_count], plan["shards"][:previous_total])
+                != predecessor["signature"]):
+            raise RuntimeError("The checkpoint's original shard definitions changed")
+    completed = state.get("completed_shards", [])
+    current = state.get("current_shard", -1)
+    if (not isinstance(completed, list)
+            or any(type(value) is not int or not 0 <= value < previous_total for value in completed)
+            or type(current) is not int or not -1 <= current < max(previous_total, 0)
+            or (state and state.get("total_shards", previous_total) != previous_total)):
+        raise RuntimeError("Invalid shard IDs or count in index checkpoint")
+    status = state.get("status", "pending")
+    if (status not in {"pending", "running", "paused", "failed", "completed"}
+            or (status == "completed" and (len(set(completed)) != previous_total or current != -1))):
+        raise RuntimeError("Invalid completion status in index checkpoint")
+    if previous_total != total_shards and len(set(completed)) < total_shards:
+        status = "pending"
     return {
         "version": 1,
         "schema_version": INDEX_SCHEMA_VERSION,
         "plan_signature": plan["signature"],
-        "status": state.get("status", "pending"),
+        "status": status,
         "total_shards": total_shards,
-        "completed_shards": sorted({
-            int(value) for value in state.get("completed_shards", [])
-            if 0 <= int(value) < total_shards
-        }),
-        "current_shard": int(state.get("current_shard", -1)),
+        "completed_shards": sorted(set(completed)),
+        "current_shard": current,
         "updated_at": state.get("updated_at", now()),
     }
 
@@ -479,9 +566,10 @@ def build_active_config(completed: list[int], settings: dict) -> str:
     for index in completed:
         name = shard_name(index)
         path = settings["indexes_dir"] / name
-        if any(settings["indexes_dir"].glob(f"{name}.*")):
-            valid_shards.append(name)
-            lines.extend([f"table {name} {{", table_settings(path), "}", ""])
+        if not path.with_suffix(".sph").is_file():
+            raise RuntimeError(f"Completed index is missing: {name}; restore its files from backup")
+        valid_shards.append(name)
+        lines.extend([f"table {name} {{", table_settings(path), "}", ""])
     lines.extend(["table matrix_records {", "  type = distributed", "  local = matrix_rows_empty"])
     lines.extend(f"  local = {name}" for name in valid_shards)
     lines.extend([
@@ -644,7 +732,12 @@ def run_locked(settings: dict, args: argparse.Namespace) -> int:
     if args.clean:
         clean_all_indexes(settings)
 
-    plan = load_or_create_plan(settings)
+    has_indexes = any(settings["indexes_dir"].glob("matrix_row_*"))
+    if not settings["plan_path"].exists() and (settings["state_path"].exists() or has_indexes):
+        raise RuntimeError("Index plan is missing for existing state; restore a matching backup")
+    if not settings["state_path"].exists() and has_indexes:
+        raise RuntimeError("Index checkpoint is missing for existing indexes; restore a matching backup")
+    plan = load_or_create_plan(settings, refresh=not (args.init_config or args.check_config))
     state = load_state(settings["state_path"], plan)
     completed = set(state["completed_shards"])
     state["completed_shards"] = sorted(completed)

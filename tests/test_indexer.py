@@ -92,18 +92,18 @@ class IndexerTests(unittest.TestCase):
             if "FROM `data_base`" in sql:
                 return [{"id": 7, "name_table": "source_people"}]
             if "information_schema.COLUMNS" in sql:
-                return [{"table_name": "source_people", "column_name": "id", "data_type": "int"},
+                return [{"table_name": "source_people", "column_name": "id", "data_type": "int", "is_nullable": "NO"},
                         {"table_name": "source_people", "column_name": "mail", "data_type": "varchar"},
                         {"table_name": "work_items", "column_name": "id", "data_type": "int"}]
-            return [{"table_name": "source_people", "max_id": 3},
-                    {"table_name": "work_items", "max_id": 999}]
+            return [{"max_id": 3, "min_id": 1}]
 
         with patch.object(self.indexer, "query_json_rows", side_effect=query):
             plan = self.indexer.discover_plan(settings)
         self.assertEqual([(host, database) for host, database, _ in queries],
                          [("mysql", "matrix"), ("source-db", "source_data"), ("source-db", "source_data")])
         self.assertIn("TABLE_NAME IN ('source_people')", queries[1][2])
-        self.assertIn("TABLE_NAME IN ('source_people')", queries[2][2])
+        self.assertIn("MAX(`id`)", queries[2][2])
+        self.assertIn("FROM `source_people`", queries[2][2])
         self.assertEqual([row["name_table"] for row in plan["databases"]], ["source_people"])
         config = self.indexer.build_indexer_config(0, plan["shards"][0], plan, settings)
         self.assertIn("sql_host = source-db", config)
@@ -152,14 +152,21 @@ class IndexerTests(unittest.TestCase):
         settings = self.indexer.load_settings()
         settings["plan_path"].parent.mkdir(parents=True)
         settings["plan_path"].write_text(json.dumps({
-            "schema_version": 3, "signature": "plan", "databases": [{"id": 7}],
+            "schema_version": 3, "signature": "plan",
+            "databases": [{"id": 7, "name_table": "source_people"}],
             "shards": [{"id_span": 3, "segments": [{"table_name": "source_people"}]}],
         }))
         lock = SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)
         process = SimpleNamespace(wait=lambda: 0)
+
+        def build(*args):
+            (settings["indexes_dir"] / "matrix_row_0000.sph").write_bytes(b"checked index")
+            return process
+
         with patch.object(sys, "argv", [str(SCRIPT)]), patch.dict(sys.modules, {"fcntl": lock}), \
+             patch.object(self.indexer, "read_catalog", return_value=[]), \
              patch.object(self.indexer, "build_indexer_config", return_value="private source config"), \
-             patch.object(self.indexer.subprocess, "Popen", return_value=process), \
+             patch.object(self.indexer.subprocess, "Popen", side_effect=build), \
              patch.object(self.indexer.subprocess, "run", return_value=SimpleNamespace(returncode=0)), \
              patch.object(self.indexer, "reload_searchd", side_effect=[None, RuntimeError("not visible")]):
             with self.assertRaisesRegex(RuntimeError, "not visible"):
