@@ -1,0 +1,58 @@
+# Opt in with: docker compose -f compose.yaml -f compose.storage.yaml ...
+# Precreate these directories on the Linux Docker host; see docs/deployment.md.
+# Keep a separate MATRIX_DATA_ROOT and Compose project for each installation.
+volumes:
+  mysql-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/mysql-data
+  control-files:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/control-files
+  manticore-root:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-root
+  manticore-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-config
+  manticore-state:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-state
+  manticore-indexes:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-indexes
+  manticore-runtime:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-runtime
+  manticore-log:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-log
+  manticore-private:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/manticore-private

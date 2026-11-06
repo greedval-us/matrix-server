@@ -24,6 +24,7 @@ x-manticore-environment: &manticore-environment
   MANTICORE_CONFIG: /var/lib/manticore/config/manticore.conf
   MANTICORE_PID_FILE: /var/lib/manticore/runtime/searchd.pid
   MANTICORE_LISTEN_HOST: 0.0.0.0
+  MANTICORE_ACCESS_MODE: ${MANTICORE_ACCESS_MODE:-mmap_preread}
 
 services:
   mysql:
@@ -77,6 +78,7 @@ services:
     restart: unless-stopped
     environment: *manticore-environment
     volumes:
+      - manticore-root:/var/lib/manticore
       - manticore-config:/var/lib/manticore/config
       - manticore-state:/var/lib/manticore/state
       - manticore-indexes:/var/lib/manticore/indexes
@@ -165,6 +167,7 @@ services:
       MANTICORE_RANGE_STEP: ${MANTICORE_RANGE_STEP:-500000}
       MANTICORE_INDEXER_MEM_LIMIT: ${MANTICORE_INDEXER_MEM_LIMIT:-2047M}
     volumes:
+      - manticore-root:/var/lib/manticore
       - manticore-config:/var/lib/manticore/config
       - manticore-state:/var/lib/manticore/state
       - manticore-indexes:/var/lib/manticore/indexes
@@ -188,6 +191,7 @@ networks:
 volumes:
   mysql-data:
   control-files:
+  manticore-root:
   manticore-config:
   manticore-state:
   manticore-indexes:

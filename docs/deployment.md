@@ -1,10 +1,36 @@
-# Будущая выкладка Matrix
+# Разработка и выкладка Matrix
 
-Инструкция для оператора будущего Linux Docker-хоста. Команды запуска ниже нужно
-выполнять на этапе выкладки; при разработке они не выполняются. На этом этапе
-проверяется только конфигурация Compose без запуска daemon, контейнеров или доступа
-к исходному серверу. Нужны Docker Engine с Compose v2, место под индексы и доступ к исходной
-MariaDB из явно запускаемых задач.
+Локально разрабатывают и проверяют переносимые исходники. Установку, настройку TLS,
+подготовку дисков и запуск выполняют на Linux Docker-хосте. Для этого нужны Docker
+Engine с Compose v2, место под индексы и доступ к исходной MariaDB из явно
+запускаемых задач.
+
+## Граница репозитория и сервера
+
+В GitHub находятся код, миграции, универсальные `compose.yaml` и
+`compose.storage.yaml`, env-шаблоны с заменителями и общие инструкции. Реальные
+имена хостов, IP, пароли, ключи, сертификаты, пути дисков и настройки ресурсов
+конкретной установки хранятся только на сервере вне checkout. Туда же относятся
+данные, индексы, логи, рабочие скрипты оператора, результаты проверок и архивы истории.
+
+Пример структуры на сервере; все пути ниже условные:
+
+```text
+/srv/matrix/
+  source/                 # checkout исходников
+  config/                 # защищённая конфигурация, вне Git
+    runtime.env
+    compose.server.yaml
+    tls/
+  data/                   # постоянные данные
+  operations/             # скрипты, проверки, логи и резервные копии оператора
+```
+
+Локальный Node-запуск остаётся описан в [README](../README.md): `.env.example`
+копируют в локальный `.env`. Для проверки Compose достаточно явного
+`--env-file .env.compose.example config --quiet`; запуск контейнеров и доступ к
+исходной базе для такой проверки не нужны. Локальный `.env` не является серверной
+конфигурацией и не переносится в GitHub.
 
 ## Роли, данные и сеть
 
@@ -32,15 +58,19 @@ Manticore. MySQL healthcheck проверяет авторизованный SEL
 
 ## Подготовка и TLS
 
-1. Скопируйте `.env.compose.example` в `.env` на будущем хосте. Замените все пароли
-   и ключи уникальными значениями. Ограничьте доступ к `.env` (`chmod 600 .env`).
-   Compose подставляет только явно перечисленные переменные каждого сервиса;
-   файл целиком в API не передаётся. Команда `config` без `--quiet` выводит секреты.
+1. На сервере создайте защищённый каталог `config` рядом с checkout. Только для
+   новой установки скопируйте `.env.compose.example` в `config/runtime.env` и
+   замените пароли и ключи уникальными значениями. Задайте абсолютные
+   `MATRIX_DATA_ROOT` и `MATRIX_TLS_DIR`, например `/srv/matrix/data` и
+   `/srv/matrix/config/tls`. Ограничьте доступ: каталог `config` — 0700,
+   `runtime.env` и `compose.server.yaml` — 0600. Переменные поддерживаемых настроек
+   задавайте в `runtime.env`, а серверные ограничения ресурсов и прочие изменения
+   Compose — в `compose.server.yaml`. Если изменений нет, достаточно `services: {}`.
 2. В примере host bind — `127.0.0.1:50051`, TLS отключён для проверки на localhost.
    Перед LAN-доступом получите серверный сертификат с SAN для реального имени/IP.
    Поместите `server.crt`, `server.key` в `MATRIX_TLS_DIR`; этот существующий каталог
    монтируется read-only в `/run/matrix/tls`. Автоматической генерации сертификата нет.
-3. Установите `MATRIX_GRPC_TLS_CERT=/run/matrix/tls/server.crt` и
+3. В `runtime.env` установите `MATRIX_GRPC_TLS_CERT=/run/matrix/tls/server.crt` и
    `MATRIX_GRPC_TLS_KEY=/run/matrix/tls/server.key`, затем
    `MATRIX_BIND_HOST=<LAN-IP-сервера>`. Обе TLS-переменные задаются вместе.
    API работает как `node` uid/gid 1000: на Linux подойдут владелец `root:1000`,
@@ -48,6 +78,35 @@ Manticore. MySQL healthcheck проверяет авторизованный SEL
 4. Передайте клиентам доверенный CA или публичный сертификат, адрес и поисковый
    ключ. Административный ключ предназначен только для административного клиента.
    Приватный TLS-ключ остаётся на сервере. Ограничьте gRPC LAN/VPN и firewall.
+
+Во всех серверных командах ниже используется одна функция Bash с явными путями:
+
+```bash
+SOURCE=/srv/matrix/source
+EXTERNAL=/srv/matrix/config
+PROJECT=matrix-example
+
+matrix_compose() {
+  docker compose --project-directory "$SOURCE" --env-file "$EXTERNAL/runtime.env" \
+    -p "$PROJECT" -f "$SOURCE/compose.yaml" -f "$SOURCE/compose.storage.yaml" \
+    -f "$EXTERNAL/compose.server.yaml" "$@"
+}
+matrix_compose config --quiet
+```
+
+`--env-file` явно выбирает файл подстановки вместо локального `.env`; относительный
+путь к нему зависел бы от текущего каталога. Экспортированные переменные shell
+имеют приоритет над `runtime.env`: перед проверкой и запуском уберите старые
+одноимённые переменные и случайно включённые `COMPOSE_PROFILES`. Не загружайте
+`runtime.env` через `source`. `--project-directory` фиксирует базу относительных
+путей Compose, включая build context и bind mounts; даже в серверном override они
+считаются от `SOURCE`, поэтому серверные пути задавайте абсолютными. Явные `-f`
+исключают автоматическое подключение локального override. `-p` фиксирует выбранную
+установку. При каждом новом shell задавайте те же пути, имя проекта и функцию.
+
+Compose передаёт сервисам только явно перечисленные переменные, а не весь
+`runtime.env`; исходные credentials не попадают в API. `config` без `--quiet`
+выводит секреты, его полный результат храните только в защищённых операционных файлах.
 
 `MATRIX_API_KEY` и `MATRIX_ADMIN_API_KEY` должны отличаться. В первой схеме миграция
 и API используют одного операционного пользователя; это не пользователь источника.
@@ -64,25 +123,83 @@ Node-клиент MySQL передаёт пароль точно, включая
 сохраняются и проходят ту же проверку. В текущем Compose используются переменные
 паролей; переход на файлы требует их явного подключения к нужным сервисам.
 
-MySQL создаёт БД/пользователя только на пустом data-volume. Изменение пароля в `.env`
+MySQL создаёт БД/пользователя только на пустом data-volume. Изменение пароля в `runtime.env`
 не меняет пароль существующего пользователя: ротацию выполняют отдельно в MySQL и
 затем обновляют настройки. См. [инициализацию официального образа MySQL](https://github.com/docker-library/docs/blob/master/mysql/README.md#environment-variables).
+
+## Размещение данных на отдельном диске
+
+Базовый `compose.yaml` сохраняет стандартные Docker managed volumes и не требует
+`MATRIX_DATA_ROOT`. Opt-in файл `compose.storage.yaml` привязывает все девять томов
+к одноимённым подкаталогам `${MATRIX_DATA_ROOT}` через local driver с
+`type: none`, `o: bind`. Это включает MySQL, вложения, корень Manticore,
+config/state/indexes/runtime/log и private-конфигурацию Manticore.
+Корень должен быть абсолютным путём **на Docker-хосте**,
+а все подкаталоги должны существовать до создания контейнеров. См.
+[named bind volumes](https://docs.docker.com/reference/compose-file/volumes/#driver_opts).
+
+Сначала смонтируйте выбранный большой диск и обеспечьте его доступность после
+перезагрузки до запуска Docker. `/srv/matrix/data` — переносимый пример, сам по себе он
+не выбирает отдельный диск. Проверьте mountpoint и свободное место до переноса
+данных; при недоступном диске не запускайте контейнеры на пустом каталоге системного
+раздела. В примере `DATA_ROOT` должен совпадать с `MATRIX_DATA_ROOT` из
+`runtime.env`; эта shell-переменная нужна только для подготовки каталогов:
+
+```bash
+DATA_ROOT=/srv/matrix/data
+sudo install -d -m 0750 "$DATA_ROOT"
+findmnt -T "$DATA_ROOT"
+df -h "$DATA_ROOT"
+# Продолжайте только после проверки целевого диска и запаса свободного места.
+sudo install -d -m 0755 \
+  "$DATA_ROOT/manticore-root" \
+  "$DATA_ROOT/manticore-config" "$DATA_ROOT/manticore-state" \
+  "$DATA_ROOT/manticore-indexes" "$DATA_ROOT/manticore-runtime" \
+  "$DATA_ROOT/manticore-log"
+sudo install -d -m 0700 \
+  "$DATA_ROOT/mysql-data" "$DATA_ROOT/manticore-private"
+sudo install -d -o 1000 -g 1000 -m 0750 "$DATA_ROOT/control-files"
+matrix_compose config --quiet
+```
+
+Эти команды предназначены для новых пустых каталогов. Не применяйте подготовку
+владельцев к действующему хранилищу. MySQL и Manticore entrypoints подготовят
+владельцев своих новых корней при первом запуске; API работает как uid/gid 1000 и
+требует заранее доступный `control-files`. При восстановлении сохраняйте владельцев
+и права файлов: Manticore entrypoint не исправляет их рекурсивно.
+
+Для отдельной установки используйте уникальное имя проекта через `-p` либо
+`COMPOSE_PROJECT_NAME` и отдельный `MATRIX_DATA_ROOT`. Один новый каталог приложения
+недостаточен: в базовом файле задано `name: matrix`. Флаг `-p` имеет приоритет, см.
+[имя проекта Compose](https://docs.docker.com/compose/how-tos/project-name/).
+Разные проекты с одинаковым `MATRIX_DATA_ROOT` всё равно используют одни файлы.
+При совместном запуске API также нужен отдельный свободный published port.
+Для действующей установки сохраняйте прежние имя проекта и все девять путей томов.
+Функция `matrix_compose` подключает оба универсальных файла и внешний серверный
+override; при переносе только конфигурации пути данных не меняются.
+
+Добавление override или изменение `MATRIX_DATA_ROOT` **не переносит** существующие
+named volumes и не меняет путь уже созданного тома. До запуска проверьте его
+`docker volume inspect` и `Options.device`. Для смены размещения подготовьте
+согласованную копию/восстановление в новый корень и отдельный проект; не удаляйте
+старые тома для принудительного применения настроек. Успешный `config --quiet`
+проверяет Compose, но не mountpoint, права, наличие каталогов или содержимое диска.
 
 ## Первый старт
 
 На будущем хосте после настройки секретов и TLS:
 
 ```bash
-docker compose config --quiet
-docker compose build api migrate manticore indexer catalog-copy
-docker compose up -d
-docker compose ps -a
-docker compose logs --tail=100 migrate api manticore
+matrix_compose config --quiet
+matrix_compose build api migrate manticore indexer catalog-copy
+matrix_compose up -d
+matrix_compose ps -a
+matrix_compose logs --tail=100 migrate api manticore
 ```
 
 `migrate` должен завершиться с кодом 0. Он применяет версии из `migrations`, повторный
 запуск пропускает уже применённые версии. После изменения схемы/образа явно выполните
-`docker compose run --rm migrate` перед обновлением API. Ошибка миграции блокирует
+`matrix_compose run --rm migrate` перед обновлением API. Ошибка миграции блокирует
 зависимый API; не обходите её ручным запуском процесса сервера.
 
 Manticore-entrypoint готовит каталоги томов и при отсутствии активной конфигурации
@@ -91,18 +208,27 @@ Manticore-entrypoint готовит каталоги томов и при отс
 Существующая активная конфигурация при перезапуске сохраняется. Обычный `up` не
 активирует профили `indexing`/`tools` и не выполняет копирование или построение шардов.
 
+`MANTICORE_ACCESS_MODE` принимает `mmap_preread` (по умолчанию) или `mmap` и задаёт
+`access_plain_attrs`, `access_blob_attrs`, `access_dict` для генерируемых plain-шардов.
+Для индексов, превышающих доступную RAM, и параллельного запуска нескольких установок
+рекомендуется `mmap`: файлы читаются по обращению без предварительного прогрева;
+первые запросы могут быть медленнее. Doclists/hitlists сохраняют прежние настройки.
+См. [режимы доступа Manticore](https://manual.manticoresearch.com/Creating_a_table/Local_tables/Plain_and_real-time_table_settings#Accessing-table-files).
+Смена переменной сама по себе не переписывает сохранённую активную конфигурацию;
+режим применяется при следующей явной генерации конфигурации индексатором.
+
 Первый старт с пустым `data_base` допустим. Каталог/рабочие таблицы можно проверять
 административным RPC, но это ещё не проверка поиска по исходным данным.
 
 ## Копирование только каталога
 
-Подготовьте SELECT-пользователя на источнике и задайте `SOURCE_MYSQL_*` в `.env`.
+Подготовьте SELECT-пользователя на источнике и задайте `SOURCE_MYSQL_*` в `runtime.env`.
 Проверьте правильность пары: настроенный источник, например `source-db/source_data`,
 и операционная цель `mysql/matrix`.
 После миграции явно выполните:
 
 ```bash
-docker compose run --rm catalog-copy
+matrix_compose run --rm catalog-copy
 ```
 
 Задача запускает `node scripts/copy_catalog.mjs` в Node-образе с отдельным окружением.
@@ -188,7 +314,7 @@ ID и отказывается работать с непустым целевы
    (`mysql`, БД `matrix`), указав новый свободный `id` и новое `name_table`.
    Не регистрируйте таблицу, пока импорт ещё идёт. Копирование всего каталога через
    `catalog-copy` предназначено только для первоначально пустой цели.
-3. Явно выполните `docker compose run --rm indexer`. Этот же запуск используется
+3. Явно выполните `matrix_compose run --rm indexer`. Этот же запуск используется
    для первой сборки и для добавления следующих таблиц; `--clean` не нужен.
 4. После успешного завершения проверьте доступность новой таблицы в каталоге поиска
    и поиск по её данным.
@@ -196,9 +322,9 @@ ID и отказывается работать с непустым целевы
 Проверьте каталог и источник перед дорогой операцией, затем запустите одну задачу:
 
 ```bash
-docker compose run --rm indexer python3 /app/scripts/build_manticore_indexes.py --help
-docker compose run --rm indexer python3 /app/scripts/build_manticore_indexes.py --check-config
-docker compose run --rm indexer
+matrix_compose run --rm indexer python3 /app/scripts/build_manticore_indexes.py --help
+matrix_compose run --rm indexer python3 /app/scripts/build_manticore_indexes.py --check-config
+matrix_compose run --rm indexer
 ```
 
 Аргументы `run` заменяют весь command сервиса. `--check-config` проверяет конфигурацию
@@ -225,7 +351,7 @@ MySQL; метаданные и строки новых таблиц — толь
 После проверки шарда `indextool` индексатор обновляет активную конфигурацию,
 перезагружает таблицы SQL-запросом через `http://manticore:9308` и ждёт фактической
 видимости таблиц. PID namespace, PID-файл и Docker socket с ним не разделяются.
-После остановки повторите `docker compose run --rm indexer`: готовые шарды и точка
+После остановки повторите `matrix_compose run --rm indexer`: готовые шарды и точка
 продолжения сохраняются, незавершённый шард будет повторён. Не удаляйте runtime-данные
 и не меняйте идентичность каталога при восстановлении.
 
@@ -246,6 +372,7 @@ MySQL; метаданные и строки новых таблиц — толь
 | --- | --- | --- |
 | `mysql-data` | `/var/lib/mysql` | MySQL |
 | `control-files` | `/var/lib/matrix/files` | Только API; содержимое вложений `control.files` |
+| `manticore-root` | `/var/lib/manticore` | Manticore, indexer; служебный родительский каталог |
 | `manticore-config` | `/var/lib/manticore/config` | Manticore, indexer; активный `manticore.conf` |
 | `manticore-state` | `/var/lib/manticore/state` | Публичные JSON; API только read-only |
 | `manticore-indexes` | `/var/lib/manticore/indexes` | Manticore, indexer |
@@ -255,11 +382,12 @@ MySQL; метаданные и строки новых таблиц — толь
 
 `manticore-state` содержит план `index-plan.json`, прогресс `indexer.json` и
 опубликованный каталог `database-catalog.json`. Сохраняйте его вместе с
-`manticore-config` и `manticore-indexes`: после `docker compose restart` или
-`docker compose down` и последующего `docker compose up -d` они используются
+`manticore-config` и `manticore-indexes`: после `matrix_compose restart` или
+`matrix_compose down` и последующего `matrix_compose up -d` они используются
 повторно. Entry point не заменяет существующую активную конфигурацию пустым
-bootstrap. Команда `docker compose down -v` разрушительно удаляет named volumes,
-включая MySQL, план и готовые индексы; это не обычный перезапуск.
+bootstrap. Команда `matrix_compose down -v` удаляет named volumes; для стандартных
+managed volumes это уничтожает MySQL, план и готовые индексы. Не используйте её для
+перезапуска, переноса хранилища или применения storage override.
 
 Публичные файлы state имеют права 0644, каталоги 0755 — Node uid 1000 может читать
 их независимо от UID Manticore. Private-каталог имеет права 0700, секретные файлы
@@ -273,28 +401,68 @@ bootstrap. Команда `docker compose down -v` разрушительно у
 на момент подготовки. Перед выкладкой проверьте доступность тега/архитектуры;
 обновляйте и проверяйте обе роли вместе. Для воспроизводимой production-сборки
 после проверки можно закрепить digest. Базовый образ объявляет `/var/lib/manticore`
-как volume; persistent-данные приложения перечислены выше, дополнительные файлы
-в корне этого каталога не считаются частью резервной копии.
+как volume; явный `manticore-root` закрывает этот путь, чтобы Docker не создавал
+дополнительный анонимный том. Дочерние тома из таблицы сохраняют отдельные mountpoints;
+private-конфигурация с исходным паролем остаётся только в `manticore-private` у indexer.
+Дополнительные файлы в родительском каталоге не считаются частью резервной копии.
 
 Для бэкапа остановите indexer и API-запись, сделайте согласованный логический dump
 MySQL `matrix` через `mysqldump` из контейнера. Сохраните том `control-files` вместе
 с дампом MySQL: оба нужны для восстановления вложений. Затем остановите Manticore и сохраните
-config/state/indexes вместе, сохраняя владельцев и права; отдельно сохраните TLS,
-`.env` и при необходимости private-конфигурацию в защищённом хранилище. Не включайте
+config/state/indexes вместе, сохраняя владельцев и права; отдельно сохраните внешний
+каталог конфигурации (`runtime.env`, `compose.server.yaml`, `tls/`) и при необходимости
+private-конфигурацию в защищённом хранилище. Не включайте
 исходную MariaDB в перенос операционной БД. Логи храните по своей политике retention.
 Проверьте восстановление на отдельном хосте с той же версией Manticore. `down`
-сохраняет named volumes; `down -v` уничтожает их и не является обычной остановкой.
+сохраняет named volumes. При storage override отдельно управляйте резервными копиями
+и retention host-каталогов: удаление регистрации тома не является удалением этих
+каталогов. Храните прежнюю генерацию и резервные копии до подтверждённого
+восстановления и завершения согласованного срока отката. Тестовые копии и логи тоже
+занимают место; их очистку планируйте отдельно, проверяя абсолютный путь и отсутствие
+активных контейнеров, использующих каталог.
+
+### Подготовка переноса существующих индексов
+
+Сначала проверьте Manticore 29.9.0 на копиях нескольких завершённых шардов в отдельном
+корне и отдельной конфигурации. Исходные native-службу, конфигурацию и файлы оставьте
+без изменений. Не монтируйте действующее хранилище в тестовый контейнер на запись
+и не используйте hard links или symlinks на него: весь комплект файлов каждого
+выбранного шарда должен быть независимой копией из согласованного снимка/бэкапа.
+Для теста нужны отдельные runtime/log и пути только внутри тестового корня.
+
+Проверьте `indextool --check`, загрузку `searchd`, поля/атрибуты, число документов,
+контрольные запросы и повторный запуск копии. Версия tools должна совпадать с daemon.
+Успешная загрузка файлов подтверждает только проверенные шарды. Она не подтверждает
+совместимость API, всего каталога или возможность продолжить старую индексацию.
+До переноса всей генерации отдельно сверьте формат документов и ID, `index-plan.json`,
+`indexer.json`, `database-catalog.json` и активную конфигурацию с текущим кодом.
+Пути native-конфигурации нельзя переносить без адаптации к контейнерным mountpoints;
+секреты из неё не должны попадать в публичный state.
+
+Операционные таблицы и вложения переносятся согласованно через dump/restore MySQL
+`matrix` и копию `control-files`; каталог сохраняет исходные ID. Сырую директорию
+данных внешней MariaDB нельзя подставлять в `mysql-data` MySQL 8.4. Само размещение
+Docker-каталогов и проверка копий не выполняют перенос всей базы, полный запуск
+production или переключение клиентов. Полный перенос и переключение требуют
+отдельного плана после проверки совместимости и восстановления.
 
 ## Проверки при выкладке
 
-До запуска daemon локально доступны:
+Из корня checkout до запуска daemon локально доступны проверки шаблонов:
 
 ```bash
 npm test
 python3 -m unittest discover -s tests
 docker compose --env-file .env.compose.example config --quiet
 docker compose --env-file .env.compose.example --profile indexing --profile tools config --quiet
+docker compose --env-file .env.compose.example -p matrix-candidate -f compose.yaml -f compose.storage.yaml config --quiet
+docker compose --env-file .env.compose.example -p matrix-candidate -f compose.yaml -f compose.storage.yaml --profile indexing --profile tools config --quiet
 ```
+
+При подключённом `compose.storage.yaml` незаданная или пустая `MATRIX_DATA_ROOT`
+должна завершать `config --quiet` ошибкой; базовая конфигурация от неё не зависит.
+Проверьте также, что все девять `Options.device` после создания томов находятся
+в выбранном корне. Локальная проверка конфигурации не создаёт томов и контейнеров.
 
 На будущем хосте дополнительно проверьте сборку обоих образов, совпадение версий
 Manticore tools/daemon, миграцию на пустой MySQL и повторный запуск, TLS handshake,

@@ -140,6 +140,46 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(settings["catalog_connection"]["mysql_user"], "source_reader")
         self.assertEqual(settings["catalog_connection"]["mysql_database"], "source_data")
 
+    def test_access_mode_is_available_during_bootstrap_without_credentials(self):
+        with patch.dict(os.environ, {"MANTICORE_ACCESS_MODE": "mmap"}, clear=True):
+            settings = self.indexer.load_settings(bootstrap=True)
+        self.assertEqual(settings.get("access_mode"), "mmap")
+
+    def test_invalid_access_modes_are_rejected_before_bootstrap_returns(self):
+        for bootstrap in (False, True):
+            for value in ("", "file", "mlock", "MMAP", " mmap", "mmap\n}"):
+                with self.subTest(bootstrap=bootstrap, value=value), \
+                     patch.dict(os.environ, {"MANTICORE_ACCESS_MODE": value}):
+                    with self.assertRaisesRegex(RuntimeError, "MANTICORE_ACCESS_MODE"):
+                        self.indexer.load_settings(bootstrap=bootstrap)
+
+    def test_access_mode_survives_active_and_indexer_config_generation(self):
+        indexes = self.root / "indexes"
+        indexes.mkdir()
+        (indexes / "matrix_row_0000.sph").write_bytes(b"checked index")
+        (indexes / "matrix_row_0001.sph").write_bytes(b"checked index")
+        shard = {"segments": [{"database_id": 7, "table_name": "source_people",
+                               "start_id": 1, "end_id": 3}]}
+        plan = {"databases": [{"id": 7, "columns": [
+            {"name": "id", "data_type": "int"}, {"name": "mail", "data_type": "varchar"},
+        ]}]}
+        for configured, expected in ((None, "mmap_preread"), ("mmap", "mmap"),
+                                     ("mmap_preread", "mmap_preread")):
+            with self.subTest(mode=configured):
+                if configured is None:
+                    os.environ.pop("MANTICORE_ACCESS_MODE", None)
+                else:
+                    os.environ["MANTICORE_ACCESS_MODE"] = configured
+                settings = self.indexer.load_settings()
+                active = self.indexer.build_active_config([0, 1], settings)
+                indexer = self.indexer.build_indexer_config(0, shard, plan, settings)
+                for directive in ("access_plain_attrs", "access_blob_attrs", "access_dict"):
+                    pattern = rf"^  {directive} = (\S+)$"
+                    self.assertEqual(re.findall(pattern, active, re.MULTILINE), [expected, expected])
+                    self.assertEqual(re.findall(pattern, indexer, re.MULTILINE), [expected])
+                for config in (active, indexer):
+                    self.assertNotRegex(config, r"access_(doclists|hitlists)\s*=")
+
     def test_resume_reuses_plan_without_database_discovery(self):
         settings = self.indexer.load_settings()
         settings["plan_path"].parent.mkdir(parents=True)

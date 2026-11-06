@@ -14,6 +14,13 @@ coverage/
 *.tsbuildinfo
 
 # Local configuration and credentials
+compose.server.yaml
+compose.server.yml
+compose.override.yaml
+compose.override.yml
+compose.*.local.yaml
+compose.*.local.yml
+deployment-config/
 .env
 .env.*
 !.env.example
@@ -29,9 +36,9 @@ id_rsa
 id_ed25519
 id_rsa.pub
 id_ed25519.pub
-/.npmrc
-/.aws/
-/.ssh/
+.npmrc
+.aws/
+.ssh/
 *.crt
 *.cer
 *.der

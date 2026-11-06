@@ -12,8 +12,11 @@ const contentRules = [
   ['personal mounted path', /\/(?:media|home|Users)\/[a-z0-9_.-]+\//i],
   ['private key material', /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/],
 ];
-const localFile = /(?:^|\/)(?:\.env(?:\..*)?|id_rsa|id_ed25519)$|\.(?:key|pem|crt|cer|p12|pfx|jks|keystore)$/i;
+const localFile = /(?:^|\/)(?:\.env(?:\..*)?|id_(?:rsa|ed25519)(?:\.pub)?)$|\.(?:env|key|pem|crt|cer|der|p12|pfx|jks|keystore)$/i;
 const environmentTemplate = /(?:^|\/)\.env(?:\.[^/]+)?\.(?:example|sample|template)$/i;
+const privateComposeFile = /(?:^|\/)compose\.(?:server|override|[^/]+\.local)\.ya?ml$/i;
+const privateDeploymentPath = /(?:^|\/)deployment-config(?:\/|$)/i;
+const privateConfigPath = /(?:^|\/)(?:\.aws|\.ssh|\.npmrc)(?:\/|$)/i;
 const generatedPath = /(?:^|\/)(?:\.git|node_modules|build|dist(?:-electron)?|output|out|release(?:-next)?|logs|coverage|\.cache|\.npm|\.electron-cache|\.electron-builder-cache|__pycache__|\.pytest_cache|\.venv|venv|\.codex|\.agents)(?:\/|$)/;
 const localRuntimePath = /^(?:(?:data|indexes|state|runtime|private|backups|files|attachments|tmp|temp|\.superpowers)\/|docs\/(?:superpowers|plans)\/)/;
 const planningDocument = /^docs\/(?:.*\/)?[^/]*-plans?\.md$/i;
@@ -120,6 +123,14 @@ async function inspectRepository(repository) {
     }
     scanned += 1;
     const portableName = filename.replaceAll('\\', '/');
+    if (privateComposeFile.test(portableName) || privateDeploymentPath.test(portableName)) {
+      findings.push({ filename, line: 1, rule: 'private deployment configuration' });
+      continue;
+    }
+    if (privateConfigPath.test(portableName)) {
+      findings.push({ filename, line: 1, rule: 'private access or package configuration' });
+      continue;
+    }
     if (generatedPath.test(portableName) || localRuntimePath.test(portableName)) {
       findings.push({ filename, line: 1, rule: 'tracked local output, dependency or assistant state' });
       continue;

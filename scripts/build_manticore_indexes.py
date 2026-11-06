@@ -92,12 +92,15 @@ def load_settings(bootstrap: bool = False) -> dict:
         "active_config": Path(config_value("MANTICORE_CONFIG", active_config, path=True)),
         "pid_file": Path(config_value("MANTICORE_PID_FILE", pid_file, path=True)),
         "listen_host": os.getenv("MANTICORE_LISTEN_HOST", "127.0.0.1"),
+        "access_mode": os.getenv("MANTICORE_ACCESS_MODE", "mmap_preread"),
         "reload_url": os.getenv("MANTICORE_RELOAD_URL", ""),
         "reload_timeout": positive_number("MANTICORE_RELOAD_TIMEOUT", "30", integer=False),
         "reload_poll_interval": positive_number("MANTICORE_RELOAD_POLL_INTERVAL", "0.25", integer=False),
     }
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", settings["listen_host"]):
         raise RuntimeError("Invalid MANTICORE_LISTEN_HOST")
+    if settings["access_mode"] not in ("mmap", "mmap_preread"):
+        raise RuntimeError("MANTICORE_ACCESS_MODE must be mmap or mmap_preread")
     if settings["reload_url"]:
         url = urlsplit(settings["reload_url"])
         if (url.scheme not in ("http", "https") or not url.hostname or url.username
@@ -482,11 +485,15 @@ def search_expression(field: str, columns: list[dict]) -> str:
     )
 
 
-def table_settings(path: Path, sources: list[str] | None = None) -> str:
+def table_settings(path: Path, sources: list[str] | None = None,
+                   access_mode: str = "mmap_preread") -> str:
     lines = ["  type = plain"]
     lines.extend(f"  source = {source}" for source in (sources or []))
     lines.extend([
         f"  path = {path}",
+        f"  access_plain_attrs = {access_mode}",
+        f"  access_blob_attrs = {access_mode}",
+        f"  access_dict = {access_mode}",
         "  stored_fields =",
         "  stored_only_fields = payload",
         "  dict = keywords",
@@ -534,7 +541,7 @@ def build_indexer_config(index: int, shard: dict, plan: dict, settings: dict) ->
     return f"""{sources_text}
 
 table {name} {{
-{table_settings(settings['indexes_dir'] / name, source_names)}
+{table_settings(settings['indexes_dir'] / name, source_names, settings.get('access_mode', 'mmap_preread'))}
 }}
 
 indexer {{
@@ -569,7 +576,9 @@ def build_active_config(completed: list[int], settings: dict) -> str:
         if not path.with_suffix(".sph").is_file():
             raise RuntimeError(f"Completed index is missing: {name}; restore its files from backup")
         valid_shards.append(name)
-        lines.extend([f"table {name} {{", table_settings(path), "}", ""])
+        lines.extend([f"table {name} {{",
+                      table_settings(path, access_mode=settings.get("access_mode", "mmap_preread")),
+                      "}", ""])
     lines.extend(["table matrix_records {", "  type = distributed", "  local = matrix_rows_empty"])
     lines.extend(f"  local = {name}" for name in valid_shards)
     lines.extend([
