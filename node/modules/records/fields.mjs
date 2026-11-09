@@ -6,6 +6,7 @@ export const CONTROL_COLUMNS = Object.freeze([
   { key: 'number', label: 'Номер', type: 'text', sortable: true },
   { key: 'fio', label: 'ФИО', type: 'text', sortable: true },
   { key: 'date_of_birth', label: 'Дата рождения', type: 'date', sortable: true },
+  { key: 'initiator', label: 'Инициатор', type: 'text', sortable: true },
   { key: 'executor', label: 'Исполнитель', type: 'text', sortable: true },
   { key: 'note', label: 'Примечание', type: 'text', sortable: true },
   { key: 'realization', label: 'Реализация', type: 'text', sortable: true },

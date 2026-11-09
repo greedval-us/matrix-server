@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 const FILE_A = { id: '11111111-1111-4111-8111-111111111111', name: 'акт.pdf', size: '25', mime_type: 'application/pdf' }
 const FILE_B = { id: '22222222-2222-4222-8222-222222222222', name: 'scan.txt', size: '0', mime_type: 'text/plain' }
 const rawRow = (overrides = {}) => ({ id: '9007199254740993', date: '2026-11-05', number: '+007', fio: 'Иванов И.И.',
-  date_of_birth: null, executor: 'Оператор', note: null, realization: '', intersections: '', files: '[]', ...overrides })
+  date_of_birth: null, initiator: 'Заявитель', executor: 'Оператор', note: null, realization: '', intersections: '', files: '[]', ...overrides })
 
 // Only the external MySQL boundary is doubled: SQL, bound parameters and transaction
 // ownership are observable outputs of the real repository.
@@ -38,13 +38,14 @@ test('list returns all explicit display fields and independent attachment metada
     { key: 'number', label: 'Номер', type: 'text', sortable: true },
     { key: 'fio', label: 'ФИО', type: 'text', sortable: true },
     { key: 'date_of_birth', label: 'Дата рождения', type: 'date', sortable: true },
+    { key: 'initiator', label: 'Инициатор', type: 'text', sortable: true },
     { key: 'executor', label: 'Исполнитель', type: 'text', sortable: true },
     { key: 'note', label: 'Примечание', type: 'text', sortable: true },
     { key: 'realization', label: 'Реализация', type: 'text', sortable: true },
     { key: 'intersections', label: 'Пересечения', type: 'text', sortable: true },
   ])
   assert.deepEqual(page.rows, [{ id: '9007199254740993', values: { date: '2026-11-05', id: '9007199254740993',
-    number: '+007', fio: 'Иванов И.И.', date_of_birth: '', executor: 'Оператор', note: '', realization: '', intersections: '' }, files: [FILE_A] }])
+    number: '+007', fio: 'Иванов И.И.', date_of_birth: '', initiator: 'Заявитель', executor: 'Оператор', note: '', realization: '', intersections: '' }, files: [FILE_A] }])
   assert.equal(page.total, '9007199254740995')
   assert.match(calls[0].sql, /ORDER BY `date` DESC, `id` DESC LIMIT \? OFFSET \?$/)
   assert.deepEqual(calls[0].params, [100, 0])
@@ -53,17 +54,17 @@ test('list returns all explicit display fields and independent attachment metada
 test('literal global search covers every display field before sorting and paging and reuses its filter for count', async () => {
   const query = "50%_=' OR 1=1"
   const { repo, calls } = await repository([[], [{ total: '0' }]])
-  await repo.list({ query, sort_key: 'fio', sort_direction: 'asc', page: 3, page_size: 20 })
+  await repo.list({ query, sort_key: 'initiator', sort_direction: 'asc', page: 3, page_size: 20 })
   const [select, count] = calls
   assert.ok(!select.sql.includes(query))
-  for (const field of ['date', 'id', 'number', 'fio', 'date_of_birth', 'executor', 'note', 'realization', 'intersections']) {
+  for (const field of ['date', 'id', 'number', 'fio', 'date_of_birth', 'initiator', 'executor', 'note', 'realization', 'intersections']) {
     assert.match(select.sql.slice(select.sql.indexOf(' WHERE ')), new RegExp('`' + field + '`[^?]*LIKE \\?'))
   }
-  assert.match(select.sql, /WHERE .* ORDER BY `fio` ASC, `id` ASC LIMIT \? OFFSET \?$/)
-  assert.deepEqual(select.params, [...Array(9).fill("%50=%=_==' OR 1==1%"), 20, 40])
-  assert.deepEqual(count.params, Array(9).fill("%50=%=_==' OR 1==1%"))
+  assert.match(select.sql, /WHERE .* ORDER BY `initiator` ASC, `id` ASC LIMIT \? OFFSET \?$/)
+  assert.deepEqual(select.params, [...Array(10).fill("%50=%=_==' OR 1==1%"), 20, 40])
+  assert.deepEqual(count.params, Array(10).fill("%50=%=_==' OR 1==1%"))
   assert.equal(select.sql.split(' WHERE ')[1].split(' ORDER BY ')[0], count.sql.split(' WHERE ')[1])
-  assert.equal((select.sql.match(/ESCAPE '='/g) ?? []).length, 9)
+  assert.equal((select.sql.match(/ESCAPE '='/g) ?? []).length, 10)
 })
 
 test('proto defaults select the first page and ID sort has no contradictory tiebreaker', async () => {
@@ -101,6 +102,24 @@ test('row CRUD binds text and preserves unsigned bigint generated IDs', async ()
   assert.deepEqual(calls[2].params, [note, '18446744073709551615'])
 })
 
+test('initiator is optional, roundtrips as plain text and can be cleared without changing executor', async () => {
+  const initiator = "Заявитель'); DROP TABLE control;--"
+  const { repo, calls } = await repository([{ insertId: '1' }, [rawRow({ id: '1', initiator })],
+    { affectedRows: 1 }, [rawRow({ id: '1', initiator: '' })], [rawRow({ id: '2', initiator: null })]])
+  const created = await repo.create({ initiator, executor: 'Оператор' })
+  assert.equal(created.values.initiator, initiator)
+  assert.equal(created.values.executor, 'Оператор')
+  assert.equal(calls[0].sql, 'INSERT INTO `control` (`initiator`, `executor`) VALUES (?, ?)')
+  assert.deepEqual(calls[0].params, [initiator, 'Оператор'])
+  assert.match(calls[1].sql, /`date_of_birth`, `initiator`, `executor`/)
+  const cleared = await repo.update('1', { initiator: '' })
+  assert.equal(cleared.values.initiator, '')
+  assert.equal(cleared.values.executor, 'Оператор')
+  assert.equal(calls[2].sql, 'UPDATE `control` SET `initiator` = ? WHERE `id` = ?')
+  assert.deepEqual(calls[2].params, ['', '1'])
+  assert.equal((await repo.get('2')).values.initiator, '')
+})
+
 test('empty create relies on database date defaults while blank dates bind NULL', async () => {
   const { repo, calls } = await repository([{ insertId: '1' }, [rawRow({ id: '1' })],
     { insertId: '2' }, [rawRow({ id: '2', date: null })]])
@@ -114,7 +133,7 @@ test('empty create relies on database date defaults while blank dates bind NULL'
 test('writes reject immutable fields, nonstrings, impossible calendar dates and byte or character overflow', async () => {
   const { repo, calls } = await repository()
   const invalid = [{ id: '1' }, { files: '[]' }, { unknown: '' }, { note: null }, { number: 'x'.repeat(65) },
-    { fio: '😀'.repeat(256) }, { executor: 'я'.repeat(256) }, { note: 'я'.repeat(32768) },
+    { fio: '😀'.repeat(256) }, { initiator: '😀'.repeat(256) }, { initiator: null }, { executor: 'я'.repeat(256) }, { note: 'я'.repeat(32768) },
     { realization: 'x'.repeat(65536) }, { intersections: '😀'.repeat(16384) },
     ...['2025-02-29', '2024-04-31', '0999-01-01', '2024-2-03', '0000-00-00', '2024-01-01T00:00:00Z'].map(date => ({ date }))]
   for (const values of invalid) {
@@ -128,9 +147,10 @@ test('writes reject immutable fields, nonstrings, impossible calendar dates and 
 test('valid leap dates, astral varchar boundaries and maximum TEXT bytes are accepted', async () => {
   const { repo, calls } = await repository([{ insertId: '3' }, [rawRow({ id: '3' })]])
   await repo.create({ date: '2000-02-29', date_of_birth: '1000-01-01', number: '😀'.repeat(64),
-    fio: '😀'.repeat(255), executor: 'я'.repeat(255), note: 'x'.repeat(65535) })
+    fio: '😀'.repeat(255), initiator: '😀'.repeat(255), executor: 'я'.repeat(255), note: 'x'.repeat(65535) })
   assert.equal(calls[0].params[0], '2000-02-29')
   assert.equal(calls[0].params[3], '😀'.repeat(255))
+  assert.equal(calls[0].params[4], '😀'.repeat(255))
 })
 
 test('get and update report absent rows and SQL errors never expose SQL or credentials', async () => {

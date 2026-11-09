@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -112,4 +113,22 @@ test('migrations record versions once, skip applied files and reject checksum dr
     await writeFile(path.join(directory, '001_test.sql'), 'CREATE TABLE `changed` (`id` INT);')
     await assert.rejects(runMigrations(pool, { directory }), /checksum/)
   } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('existing installations add the optional initiator after birth date once without rewriting control data', async () => {
+  const { runMigrations } = await import('../scripts/migrate.mjs')
+  const versions = await Promise.all(['001_operational.sql', '002_control.sql'].map(async version => ({
+    version, checksum: createHash('sha256').update(await readFile(new URL(`../migrations/${version}`, import.meta.url))).digest('hex'),
+  })))
+  const { pool, calls } = connectionFixture((sql, params) => {
+    if (sql.includes('GET_LOCK')) return [{ acquired: 1 }]
+    if (sql.startsWith('SELECT `version`')) return versions
+    if (sql.startsWith('INSERT INTO `schema_migrations`')) versions.push({ version: params[0], checksum: params[1] })
+    return []
+  })
+  assert.deepEqual(await runMigrations(pool), ['003_control_initiator.sql'])
+  assert.deepEqual(await runMigrations(pool), [])
+  const changes = calls.filter(call => call.sql && !/^(SELECT|CREATE TABLE IF NOT EXISTS `schema_migrations`|INSERT INTO `schema_migrations`)/.test(call.sql))
+  assert.equal(changes.length, 1)
+  assert.match(changes[0].sql, /^ALTER TABLE `control`\s+ADD COLUMN `initiator` VARCHAR\(255\) NULL AFTER `date_of_birth`$/)
 })
