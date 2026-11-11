@@ -1,0 +1,19 @@
+name: Publication policy
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  publication:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check committed history
+        shell: bash
+        run: |
+          printf 'refs/heads/check %s refs/heads/check %040d\n' "$(git rev-parse HEAD)" 0 | node scripts/checkPush.mjs

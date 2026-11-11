@@ -55,10 +55,13 @@ async function main() {
           revoked_at: isoTimestamp(row.revoked_at),
         }))
       },
-      async logs(id) {
-        return (await keys.logs(id)).map(row => ({ ...row, created_at: isoTimestamp(row.created_at) }))
+      async logPage(filters) {
+        const page = await keys.logPage(filters)
+        return { ...page, logs: page.logs.map(row => ({ ...row, created_at: isoTimestamp(row.created_at) })) }
       },
+      analytics: from => keys.analytics(from),
       issue: label => keys.issue(label),
+      rename: (id, label) => keys.rename(id, label),
       revoke: id => keys.revoke(id),
     }
     const handler = createWebAdminHandler({ repository, passwordHash: passwordHash.trim() })

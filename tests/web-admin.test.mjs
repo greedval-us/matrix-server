@@ -21,10 +21,18 @@ async function fixture(t, { repository = {}, now } = {}) {
     async list() { return [{ ...key, apiKey: 'do not expose', key_digest: 'do not expose' }] },
     async issue(label) { calls.push(['issue', label]); return { id: keyId, label, apiKey: 'mxk_fixture', key_digest: 'do not expose' } },
     async revoke(id) { calls.push(['revoke', id]); return { id, revoked: true } },
-    async logs(id) {
-      calls.push(['logs', id])
-      return [{ id: '9', access_key_id: id, module: 'search', method: 'GetIndexStatus', status_code: 0,
-        duration_ms: 5, created_at: '2026-11-11 10:32:00.000', signature: 'do not expose' }]
+    async rename(id, label) { calls.push(['rename', id, label]); return { id, label, apiKey: 'do not expose' } },
+    async logPage(filters) {
+      calls.push(['logPage', filters])
+      return { logs: [{ id: '9', access_key_id: keyId, label: key.label, module: 'search', method: 'GetIndexStatus', status_code: 0,
+        duration_ms: 5, created_at: '2026-11-11 10:32:00.000', signature: 'do not expose' }], nextCursor: '9' }
+    },
+    async analytics(from) {
+      calls.push(['analytics', from])
+      return { keys: { total: 1, bound: 1, pending: 0, revoked: 0, key_digest: 'do not expose' },
+        totals: { requests: 3, errors: 1, activeKeys: 1, averageMs: 5, raw_data: 'do not expose' },
+        daily: [{ day: '2026-11-11', requests: 3, errors: 1 }],
+        topKeys: [{ id: keyId, label: key.label, requests: 3, errors: 1, key_digest: 'do not expose' }] }
     },
     ...repository,
   }
@@ -89,17 +97,58 @@ test('authenticated administration exposes only approved metadata and issues a k
   assert.match(issued.headers.get('cache-control'), /no-store/)
   assert.deepEqual(await issued.json(), { id: keyId, label: 'New key', apiKey: 'mxk_fixture' })
   assert.deepEqual(await (await request('/api/keys/' + keyId + '/logs')).json(), {
-    logs: [{ id: '9', access_key_id: keyId, module: 'search', method: 'GetIndexStatus', status_code: 0,
+    nextCursor: '9',
+    logs: [{ id: '9', access_key_id: keyId, label: key.label, module: 'search', method: 'GetIndexStatus', status_code: 0,
       duration_ms: 5, created_at: '2026-11-11 10:32:00.000' }],
   })
   assert.deepEqual(await (await request('/api/keys/' + keyId + '/revoke', { method: 'POST', body: {} })).json(),
     { id: keyId, revoked: true })
-  assert.deepEqual(calls, [['issue', 'New key'], ['logs', keyId], ['revoke', keyId]])
+  assert.deepEqual(calls, [['issue', 'New key'], ['logPage', {
+    id: keyId, from: undefined, method: undefined, result: undefined, before: undefined,
+  }], ['revoke', keyId]])
 
   const logout = await request('/api/session', { method: 'DELETE' })
   assert.equal(logout.status, 204)
   assert.match(logout.headers.get('set-cookie'), /Max-Age=0/)
   assert.equal((await request('/api/keys')).status, 401)
+})
+
+test('analytics and the global journal require a session and use bounded, validated filters', async t => {
+  const { request, login, calls } = await fixture(t, { now: () => Date.parse('2026-11-11T10:00:00Z') })
+  assert.equal((await request('/api/analytics')).status, 401)
+  assert.equal((await request('/api/logs')).status, 401)
+  await login()
+  for (const url of ['/api/analytics?days=365', '/api/analytics?days=1&days=7', '/api/logs?before=18446744073709551616',
+    '/api/logs?method=some+method', '/api/logs?result=unknown', '/api/logs?days=', '/api/logs?ignored=true']) {
+    assert.equal((await request(url)).status, 400, url)
+  }
+  assert.deepEqual(calls, [])
+  const analytics = await (await request('/api/analytics?days=7')).json()
+  assert.deepEqual(analytics.keys, { total: 1, bound: 1, pending: 0, revoked: 0 })
+  assert.deepEqual(analytics.totals, { requests: 3, errors: 1, activeKeys: 1, averageMs: 5 })
+  assert.equal(analytics.daily.length, 7)
+  assert.deepEqual(analytics.daily[0], { day: '2026-11-05', requests: 0, errors: 0 })
+  assert.deepEqual(analytics.daily.at(-1), { day: '2026-11-11', requests: 3, errors: 1 })
+  assert.deepEqual(analytics.topKeys, [{ id: keyId, label: key.label, requests: 3, errors: 1 }])
+
+  const response = await request('/api/logs?days=1&method=GetIndexStatus&result=error&before=' + keyId)
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).nextCursor, '9')
+  assert.deepEqual(calls, [['analytics', '2026-11-05 00:00:00'], ['logPage', {
+    id: undefined, from: '2026-11-11 00:00:00', method: 'GetIndexStatus', result: 'error', before: keyId,
+  }]])
+})
+
+test('existing keys can be renamed with session and origin checks', async t => {
+  const { request, login, calls } = await fixture(t)
+  const path = '/api/keys/' + keyId + '/rename'
+  const rename = (label, headers) => request(path, { method: 'POST', body: { label }, headers })
+  assert.equal((await rename('Name')).status, 401)
+  await login()
+  assert.equal((await rename('Name', { origin: 'https://foreign.example.test' })).status, 403)
+  assert.equal((await rename(' ')).status, 400)
+  assert.deepEqual(await (await rename('  Имя сотрудника  ')).json(), { id: keyId, label: 'Имя сотрудника' })
+  assert.deepEqual(calls, [['rename', keyId, 'Имя сотрудника']])
 })
 
 test('cross-origin, malformed and oversized requests never mutate keys', async t => {

@@ -130,3 +130,9 @@ docker compose --env-file .env.compose.example --profile indexing --profile tool
 Этот этап не включает сборку образов, запуск Docker daemon, выкладку или доступ к
 исходному серверу. `scripts/install_server.sh` и `systemd/*` относятся к native
 выкладке в `/opt/matrix`; они не являются установщиком этого Compose.
+
+## Границы слоёв и публикация
+
+Описание слоёв: [архитектура сервера](docs/architecture.md).
+После клонирования выполните `npm run hooks:install`.
+Проверки перед коммитом и отправкой описаны в [правилах публикации](docs/publication.md).

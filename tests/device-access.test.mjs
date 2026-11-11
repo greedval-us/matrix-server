@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import grpc from '@grpc/grpc-js'
 import { createApplication } from '../node/application.mjs'
@@ -7,6 +8,7 @@ import { createAuthorizer } from '../node/core/auth.mjs'
 import { loadService } from '../node/core/protos.mjs'
 import { createRpcHandlers } from '../node/core/rpc.mjs'
 import { readSettings } from '../node/config.mjs'
+import { DeviceAccessRepository } from '../node/infrastructure/mysql/device-access.mjs'
 
 const rpcPath = '/base_search.BaseSearches/GetIndexStatus'
 const clock = 1_800_000_000_000
@@ -79,6 +81,38 @@ test('a revoked, already-bound or replayed key rejected by storage is unauthenti
     deviceRepository: { authorize: async () => null },
   })
   await assert.rejects(authorize(signedCall(generateKeyPairSync('ed25519'))), authRejected)
+})
+
+test('a verified attempt from a different device is attributed to the key without exposing its ID', async () => {
+  const identity = generateKeyPairSync('ed25519')
+  const boundKey = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' })
+  const logs = []
+  const connection = {
+    beginTransaction: async () => {},
+    execute: async () => [[{ id: '12', device_key: boundKey }]],
+    rollback: async () => {},
+    release: () => {},
+  }
+  const deviceRepository = new DeviceAccessRepository({ getConnection: async () => connection }, { now: () => clock })
+  const authorize = createAuthorizer({ authMode: 'device' }, { deviceRepository, now: () => clock })
+  const handlers = createRpcHandlers({ authorize, audit: { record: log => logs.push(log) } })
+  const unexpectedHandler = () => assert.fail('denied request reached the handler')
+  const checkError = error => {
+    assert.equal(error.code, grpc.status.PERMISSION_DENIED)
+    assert.equal(error.message, 'API key is already bound to another device')
+    assert.equal('accessKeyId' in error, false)
+  }
+
+  await handlers.unary('search', 'GetIndexStatus', unexpectedHandler)(signedCall(identity), checkError)
+  const stream = Object.assign(new EventEmitter(), signedCall(identity, { path: '/base_search.BaseSearches/StreamSearch' }))
+  stream.on('error', checkError)
+  await handlers.stream('search', 'StreamSearch', unexpectedHandler)(stream)
+
+  assert.deepEqual(logs.map(({ method, statusCode, accessKeyId }) => ({ method, statusCode, accessKeyId })), [
+    { method: 'GetIndexStatus', statusCode: grpc.status.PERMISSION_DENIED, accessKeyId: '12' },
+    { method: 'StreamSearch', statusCode: grpc.status.PERMISSION_DENIED, accessKeyId: '12' },
+  ])
+  assert.ok(!JSON.stringify(logs).includes(apiKey))
 })
 
 test('registered gRPC search uses the device identity for its audit entry', async t => {

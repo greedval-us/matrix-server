@@ -12,7 +12,10 @@
     "migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
     "catalog:copy": "node --env-file-if-exists=.env scripts/copy_catalog.mjs",
     "access:keys": "node --env-file-if-exists=.env scripts/access-keys.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "check:publication": "node scripts/checkPublication.mjs",
+    "check:staged": "node scripts/checkPublication.mjs --staged",
+    "hooks:install": "node scripts/installHooks.mjs"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.13.4",

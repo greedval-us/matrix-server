@@ -1,5 +1,6 @@
 import grpc from '@grpc/grpc-js'
 import { ApplicationError } from '../../core/errors.mjs'
+import { writeStream } from '../../core/streams.mjs'
 
 const cancelled = () => new ApplicationError(grpc.status.CANCELLED, 'File transfer cancelled')
 
@@ -9,16 +10,6 @@ async function nextFrame(iterator, signal) {
   const interruption = new Promise((_, reject) => { abort = () => reject(cancelled()); signal.addEventListener('abort', abort, { once: true }) })
   try { return await Promise.race([iterator.next(), interruption]) }
   finally { signal.removeEventListener('abort', abort) }
-}
-
-async function writeChunk(call, chunk) {
-  if (call.cancelled || call.destroyed) return false
-  if (call.write(chunk)) return true
-  await new Promise(resolve => {
-    const finish = () => { call.off('drain', finish); call.off('cancelled', finish); resolve() }
-    call.once('drain', finish); call.once('cancelled', finish)
-  })
-  return !call.cancelled && !call.destroyed
 }
 
 export class RecordsService {
@@ -83,12 +74,12 @@ export class RecordsService {
     const cancel = () => source.destroy()
     call.once('cancelled', cancel)
     try {
-      if (!await writeChunk(call, { file })) return
+      if (!await writeStream(call, { file })) return
       let received = 0n
       for await (const chunk of source) {
         received += BigInt(chunk.length)
         if (received > BigInt(file.size)) throw new ApplicationError(grpc.status.INTERNAL, 'Stored attachment size mismatch')
-        if (!await writeChunk(call, { data: chunk })) return
+        if (!await writeStream(call, { data: chunk })) return
       }
       if (!call.cancelled && !call.destroyed) {
         if (received !== BigInt(file.size)) throw new ApplicationError(grpc.status.INTERNAL, 'Stored attachment size mismatch')

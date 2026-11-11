@@ -17,6 +17,9 @@ const headers = {
 }
 const maxBody = 4096
 const maxKeyId = 18_446_744_073_709_551_615n
+const allowedPeriods = new Set(['1', '7', '30'])
+const logResults = new Set(['success', 'error', 'cancelled'])
+const dayMs = 86_400_000
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -27,6 +30,10 @@ class HttpError extends Error {
 
 function invalidBody() {
   return new HttpError(400, 'Некорректные данные запроса.')
+}
+
+function invalidFilter() {
+  return new HttpError(400, 'Некорректные фильтры.')
 }
 
 function json(response, status, data) {
@@ -63,12 +70,36 @@ async function readJson(request, property) {
   return value
 }
 
+async function readLabel(request) {
+  const input = await readJson(request, 'label')
+  const label = typeof input.label === 'string' ? input.label.trim() : ''
+  if (!label || label.length > 255 || /[\u0000-\u001f\u007f]/.test(label)) throw invalidBody()
+  return label
+}
+
+function readFilters(query, allowed) {
+  const filters = Object.create(null)
+  for (const [name, value] of new URLSearchParams(query)) {
+    if (!allowed.includes(name) || Object.hasOwn(filters, name)) throw invalidFilter()
+    filters[name] = value
+  }
+  return filters
+}
+
+function utcDay(time, offset) {
+  return new Date(time - offset * dayMs).toISOString().slice(0, 10)
+}
+
+function periodStart(time, days) {
+  return `${utcDay(time, days - 1)} 00:00:00`
+}
+
 function keyMetadata({ id, label, created_at, activated_at, revoked_at }) {
   return { id: String(id), label, created_at, activated_at, revoked_at }
 }
 
-function logMetadata({ id, access_key_id, module, method, status_code, duration_ms, created_at }) {
-  return { id: String(id), access_key_id: String(access_key_id), module, method, status_code, duration_ms, created_at }
+function logMetadata({ id, access_key_id, label, module, method, status_code, duration_ms, created_at }) {
+  return { id: String(id), access_key_id: String(access_key_id), label, module, method, status_code, duration_ms, created_at }
 }
 
 function publicError(error) {
@@ -106,10 +137,44 @@ export function createWebAdminHandler({ repository, passwordHash, now = Date.now
     return json(response, 200, { authenticated: true })
   }
 
+  async function analytics(response, query) {
+    const { days = '7' } = readFilters(query, ['days'])
+    if (!allowedPeriods.has(days)) throw invalidFilter()
+    const dayCount = Number(days)
+    const time = now()
+    const { keys, totals, daily, topKeys } = await repository.analytics(periodStart(time, dayCount))
+    const { total, bound, pending, revoked } = keys
+    const { requests, errors, activeKeys, averageMs } = totals
+    const byDay = new Map(daily.map(row => [row.day, row]))
+    return json(response, 200, {
+      keys: { total, bound, pending, revoked },
+      totals: { requests, errors, activeKeys, averageMs },
+      daily: Array.from({ length: dayCount }, (_, index) => {
+        const day = utcDay(time, dayCount - index - 1)
+        const { requests = 0, errors = 0 } = byDay.get(day) ?? {}
+        return { day, requests, errors }
+      }),
+      topKeys: topKeys.map(({ id, label, requests, errors }) => ({ id: String(id), label, requests, errors })),
+    })
+  }
+
+  async function logPage(response, query, id) {
+    const { days = '0', method, result, before } = readFilters(query, ['days', 'method', 'result', 'before'])
+    if (days !== '0' && !allowedPeriods.has(days)) throw invalidFilter()
+    if (method !== undefined && !/^[A-Za-z0-9_./]{1,128}$/.test(method)) throw invalidFilter()
+    if (result !== undefined && !logResults.has(result)) throw invalidFilter()
+    if (before !== undefined && (!/^[1-9][0-9]{0,19}$/.test(before) || BigInt(before) > maxKeyId)) throw invalidFilter()
+    const from = days === '0' ? undefined : periodStart(now(), Number(days))
+    const page = await repository.logPage({ id, from, method, result, before })
+    return json(response, 200, { logs: page.logs.map(logMetadata), nextCursor: page.nextCursor })
+  }
+
   return async function handle(request, response) {
     for (const [name, value] of Object.entries(headers)) response.setHeader(name, value)
     try {
-      const path = request.url.split('?', 1)[0]
+      const separator = request.url.indexOf('?')
+      const path = separator < 0 ? request.url : request.url.slice(0, separator)
+      const query = separator < 0 ? '' : request.url.slice(separator + 1)
       const { method } = request
       const asset = files.get(path)
       if (asset && (method === 'GET' || method === 'HEAD')) {
@@ -122,24 +187,30 @@ export function createWebAdminHandler({ repository, passwordHash, now = Date.now
         throw new HttpError(403, 'Источник запроса не подтверждён.')
       }
       if (path === '/api/session') return await session(request, response)
-      if (!path.startsWith('/api/keys')) throw new HttpError(404, 'Страница не найдена.')
+      if (path !== '/api/keys' && !path.startsWith('/api/keys/') && path !== '/api/logs' && path !== '/api/analytics') {
+        throw new HttpError(404, 'Страница не найдена.')
+      }
       if (!sessions.authenticated(request.headers.cookie)) throw new HttpError(401, 'Войдите в веб-админку.')
+      if (path === '/api/analytics' || path === '/api/logs') {
+        if (method !== 'GET') throw new HttpError(405, 'Метод запроса недоступен.')
+        return path === '/api/analytics' ? await analytics(response, query) : await logPage(response, query)
+      }
       if (path === '/api/keys' && method === 'GET') {
         return json(response, 200, { keys: (await repository.list()).map(keyMetadata) })
       }
       if (path === '/api/keys' && method === 'POST') {
-        const input = await readJson(request, 'label')
-        const label = typeof input.label === 'string' ? input.label.trim() : ''
-        if (!label || label.length > 255 || /[\u0000-\u001f\u007f]/.test(label)) throw invalidBody()
-        const { id, label: savedLabel, apiKey } = await repository.issue(label)
+        const { id, label: savedLabel, apiKey } = await repository.issue(await readLabel(request))
         return json(response, 201, { id: String(id), label: savedLabel, apiKey })
       }
-      const match = /^\/api\/keys\/([1-9][0-9]{0,19})\/(logs|revoke)$/.exec(path)
+      const match = /^\/api\/keys\/([1-9][0-9]{0,19})\/(logs|rename|revoke)$/.exec(path)
       if (!match) throw new HttpError(404, 'Страница не найдена.')
       const [, id, operation] = match
       if (BigInt(id) > maxKeyId) throw invalidBody()
-      if (operation === 'logs' && method === 'GET') {
-        return json(response, 200, { logs: (await repository.logs(id)).map(logMetadata) })
+      if (operation === 'logs' && method === 'GET') return await logPage(response, query, id)
+      if (operation === 'rename' && method === 'POST') {
+        const updated = await repository.rename(id, await readLabel(request))
+        if (!updated) throw new HttpError(404, 'Ключ не найден.')
+        return json(response, 200, { id, label: updated.label })
       }
       if (operation === 'revoke' && method === 'POST') {
         await readJson(request)

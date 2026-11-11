@@ -1,5 +1,11 @@
 import grpc from '@grpc/grpc-js'
 
+export const APPLICATION_ERROR_CODES = Object.freeze({
+  INVALID_ARGUMENT: grpc.status.INVALID_ARGUMENT,
+  RESOURCE_EXHAUSTED: grpc.status.RESOURCE_EXHAUSTED,
+  UNAVAILABLE: grpc.status.UNAVAILABLE,
+})
+
 export class ApplicationError extends Error {
   constructor(code, message) { super(message); this.code = code }
 }

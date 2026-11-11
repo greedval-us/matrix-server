@@ -33,7 +33,7 @@
 
     <section id="dashboard" aria-labelledby="page-title" hidden>
       <div class="page-heading">
-        <h1 id="page-title" tabindex="-1">Ключи доступа</h1>
+        <h1 id="page-title" tabindex="-1">Управление доступом</h1>
         <div class="actions">
           <button class="button" id="refresh" type="button">Обновить</button>
           <button class="button primary" id="open-issue" type="button">Выпустить ключ</button>
@@ -41,11 +41,59 @@
       </div>
       <p class="notice" id="dashboard-notice" role="status" hidden></p>
 
+      <section class="panel overview" aria-labelledby="analytics-title">
+        <div class="panel-heading">
+          <h2 id="analytics-title">Аналитика</h2>
+          <label class="period-select">
+            <span class="sr-only">Период аналитики</span>
+            <select id="analytics-days">
+              <option value="1">Сегодня (UTC)</option>
+              <option value="7" selected>7 дней</option>
+              <option value="30">30 дней</option>
+            </select>
+          </label>
+        </div>
+        <p class="panel-message muted" id="analytics-message" role="status">Загружаем аналитику…</p>
+        <div id="analytics-content" hidden>
+          <dl class="metrics">
+            <div><dt>Запросы</dt><dd id="metric-requests"></dd></div>
+            <div><dt>Ошибки</dt><dd id="metric-errors"></dd></div>
+            <div><dt>Ключи с запросами</dt><dd id="metric-active"></dd></div>
+            <div><dt>Среднее время</dt><dd id="metric-duration"></dd></div>
+          </dl>
+          <div class="analytics-detail">
+            <section class="analytics-section" aria-labelledby="daily-title">
+              <h3 id="daily-title">Запросы по дням <span class="muted chart-unit">UTC</span></h3>
+              <div class="daily-scroll" role="region" aria-label="Запросы по дням" tabindex="0">
+                <table class="daily-table">
+                  <thead><tr><th scope="col">Дата</th><th scope="col">Запросы</th><th scope="col">Ошибки</th></tr></thead>
+                  <tbody id="daily-rows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="analytics-section" aria-labelledby="top-keys-title">
+              <h3 id="top-keys-title">Ключи по числу запросов</h3>
+              <p class="muted analytics-empty" id="top-keys-empty" hidden>За выбранный период запросов нет.</p>
+              <ul class="top-keys" id="top-keys"></ul>
+            </section>
+          </div>
+        </div>
+      </section>
+
       <div class="workspace">
         <section class="panel key-panel" aria-labelledby="keys-title">
           <div class="panel-heading">
-            <h2 id="keys-title">Список ключей</h2>
+            <h2 id="keys-title">Ключи доступа</h2>
             <span class="count" id="key-count" hidden></span>
+          </div>
+          <dl class="key-breakdown" id="key-breakdown" hidden>
+            <div><dt>Привязаны</dt><dd id="key-bound"></dd></div>
+            <div><dt>Ожидают</dt><dd id="key-pending"></dd></div>
+            <div><dt>Отозваны</dt><dd id="key-revoked"></dd></div>
+          </dl>
+          <div class="key-search">
+            <label class="sr-only" for="key-search">Поиск ключа по имени или номеру</label>
+            <input id="key-search" type="search" placeholder="Имя или номер ключа" autocomplete="off">
           </div>
           <p class="panel-message muted" id="key-message" role="status">Загружаем ключи…</p>
           <ul class="key-list" id="key-list" aria-labelledby="keys-title"></ul>
@@ -53,10 +101,9 @@
 
         <section class="panel detail-panel" aria-labelledby="journal-title">
           <div class="panel-heading">
-            <h2 id="journal-title">Журнал ключа</h2>
-            <span class="count" id="log-count" hidden></span>
+            <h2 id="journal-title" tabindex="-1">Журнал запросов</h2>
+            <button class="button" id="show-all-logs" type="button" hidden>Все ключи</button>
           </div>
-          <p class="panel-message muted" id="no-selection">Выберите ключ в списке, чтобы посмотреть журнал.</p>
           <div id="key-detail" hidden>
             <div class="key-detail-header">
               <div class="key-detail-title">
@@ -71,16 +118,46 @@
                 <div><dt>Привязан</dt><dd id="activated-at"></dd></div>
                 <div id="revoked-fact" hidden><dt>Отозван</dt><dd id="revoked-at"></dd></div>
               </dl>
-              <button class="button danger-quiet" id="open-revoke" type="button">Отозвать ключ</button>
+              <div class="actions">
+                <button class="button" id="open-rename" type="button">Изменить имя</button>
+                <button class="button danger-quiet" id="open-revoke" type="button">Отозвать ключ</button>
+              </div>
             </div>
-            <p class="panel-message muted log-message" id="log-message" role="status" hidden></p>
-            <div class="journal" id="journal" hidden>
-              <table>
-                <caption class="sr-only">Операции выбранного ключа</caption>
-                <thead><tr><th scope="col">Время</th><th scope="col">Операция</th><th scope="col">Результат</th><th scope="col">Время запроса</th></tr></thead>
-                <tbody id="log-rows"></tbody>
-              </table>
-            </div>
+          </div>
+          <form class="log-filters" id="log-filters" aria-label="Фильтры журнала">
+            <label>
+              <span>Период</span>
+              <select id="log-days">
+                <option value="0">Всё время</option>
+                <option value="1">Сегодня (UTC)</option>
+                <option value="7">7 дней</option>
+                <option value="30">30 дней</option>
+              </select>
+            </label>
+            <label>
+              <span>Операция</span>
+              <select id="log-method"><option value="">Все операции</option></select>
+            </label>
+            <label>
+              <span>Результат</span>
+              <select id="log-result">
+                <option value="">Все результаты</option>
+                <option value="success">Успешно</option>
+                <option value="error">Ошибка</option>
+                <option value="cancelled">Отменено</option>
+              </select>
+            </label>
+          </form>
+          <p class="panel-message muted log-message" id="log-message" role="status" hidden></p>
+          <div class="journal" id="journal" role="region" aria-labelledby="journal-title" tabindex="0" hidden>
+            <table>
+              <thead><tr><th scope="col">Время</th><th scope="col" id="log-key-heading">Ключ</th><th scope="col">Операция</th><th scope="col">Результат</th><th scope="col">Длительность</th></tr></thead>
+              <tbody id="log-rows"></tbody>
+            </table>
+          </div>
+          <div class="journal-footer" id="journal-footer" hidden>
+            <span class="muted" id="log-count" role="status"></span>
+            <button class="button" id="more-logs" type="button" hidden>Показать ещё</button>
           </div>
         </section>
       </div>
@@ -91,8 +168,8 @@
     <div class="dialog-body">
       <h2 id="issue-title">Выпустить ключ</h2>
       <form id="issue-form" class="stack">
-        <label for="key-label">Название ключа</label>
-        <input id="key-label" type="text" required maxlength="255" placeholder="Например, имя сотрудника">
+        <label for="key-label">Имя ключа</label>
+        <input id="key-label" type="text" required maxlength="255" placeholder="Например, имя сотрудника" autocomplete="off">
         <p class="notice error" id="issue-error" role="alert" hidden></p>
         <div class="dialog-actions">
           <button class="button" id="cancel-issue" type="button">Отмена</button>
@@ -100,6 +177,7 @@
         </div>
       </form>
       <div id="issued-view" class="stack" hidden>
+        <p class="revoke-name" id="issued-label"></p>
         <p class="muted">Скопируйте ключ перед закрытием. Он показывается один раз.</p>
         <label for="issued-key">API-ключ</label>
         <input id="issued-key" class="secret" type="text" readonly autocomplete="off" spellcheck="false">
@@ -109,6 +187,21 @@
           <button class="button primary" id="copy-key" type="button">Скопировать ключ</button>
         </div>
       </div>
+    </div>
+  </dialog>
+
+  <dialog id="rename-dialog" aria-labelledby="rename-title">
+    <div class="dialog-body">
+      <h2 id="rename-title">Изменить имя ключа</h2>
+      <form id="rename-form" class="stack">
+        <label for="rename-label">Имя ключа</label>
+        <input id="rename-label" type="text" required maxlength="255" autocomplete="off">
+        <p class="notice error" id="rename-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="button" id="cancel-rename" type="button">Отмена</button>
+          <button class="button primary" type="submit">Сохранить имя</button>
+        </div>
+      </form>
     </div>
   </dialog>
 

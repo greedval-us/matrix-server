@@ -8,7 +8,13 @@ export function createRpcHandlers({ authorize, audit }) {
     let finished = false
     let accessKeyId
     return {
-      identify(principal) { accessKeyId = principal?.accessKeyId },
+      async identify(call, access) {
+        try { accessKeyId = (await authorize(call, access))?.accessKeyId }
+        catch (error) {
+          if (error?.code === grpc.status.PERMISSION_DENIED) accessKeyId = error.accessKeyId
+          throw error
+        }
+      },
       finish(statusCode) {
         if (finished) return
         finished = true
@@ -23,7 +29,7 @@ export function createRpcHandlers({ authorize, audit }) {
       return async (call, callback) => {
         const request = completion(module, method)
         try {
-          request.identify(await authorize(call, access))
+          await request.identify(call, access)
           if (call.cancelled) {
             request.finish(grpc.status.CANCELLED)
             return
@@ -45,7 +51,7 @@ export function createRpcHandlers({ authorize, audit }) {
         call.once('cancelled', () => request.finish(grpc.status.CANCELLED))
         call.once('error', error => request.finish(error.code ?? grpc.status.INTERNAL))
         try {
-          request.identify(await authorize(call, access))
+          await request.identify(call, access)
           if (call.cancelled || call.destroyed) return
           await handler(call)
         } catch (error) {

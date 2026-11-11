@@ -271,14 +271,20 @@ matrix_compose exec api node scripts/access-keys.mjs revoke ID_КЛЮЧА
 отзовите прежний ключ и выпустите новый.
 
 Журнал `access_key_logs` связывает запросы с ID ключа. В нём сохраняются время,
-операция, статус и длительность. Команда `list` показывает ID ключей, `logs`
+модуль, операция, код gRPC и длительность. Попытка использовать привязанный ключ
+с действительной подписью другого устройства записывается с кодом `PERMISSION_DENIED`.
+Команда `list` показывает ID ключей, `logs`
 выводит до 1000 последних событий по указанному ID.
 
 ## Веб-админка ключей
 
-Сервис `web-admin` запускается отдельным контейнером из профиля `admin`. Он
-читает статусы и журналы ключей из операционной MySQL. Перед запуском примените
-миграции, включая `006_device_access_keys.sql`.
+Сервис `web-admin` запускается отдельным контейнером из профиля `admin`. В нём
+можно выпускать ключи с именем владельца, менять имя выданного ключа и отзывать доступ.
+Сводка показывает число запросов, ошибок и использованных ключей за 1, 7 или 30
+календарных дней по UTC, включая сегодня. В общем журнале и журнале выбранного
+ключа доступны фильтры по периоду, операции и результату. Отменённые запросы
+выделены отдельным результатом. Перед запуском примените миграции, включая
+`007_access_key_log_dates.sql`, которая добавляет индекс по времени событий.
 
 Во внешнем `runtime.env` задайте `MATRIX_WEB_ADMIN_SECRETS_DIR` с абсолютным путём
 к закрытому каталогу, `MATRIX_WEB_ADMIN_DB_USER` с именем пользователя MySQL и,
@@ -298,7 +304,7 @@ matrix_compose exec api node scripts/access-keys.mjs revoke ID_КЛЮЧА
 ```sql
 CREATE USER 'matrix_web_admin'@'%' IDENTIFIED BY 'replace-with-random-password';
 GRANT SELECT (id, label, created_at, activated_at, revoked_at),
-      INSERT (label, key_digest), UPDATE (revoked_at)
+      INSERT (label, key_digest), UPDATE (label, revoked_at)
       ON matrix.access_keys TO 'matrix_web_admin'@'%';
 GRANT SELECT ON matrix.access_key_logs TO 'matrix_web_admin'@'%';
 ```
@@ -334,6 +340,21 @@ matrix_compose --profile admin up -d --no-deps web-admin
 применены. Откройте HTTPS-адрес, заданный при развёртывании. После выпуска ключа
 скопируйте его в момент выдачи. В списке остаются ID, название, время создания,
 привязки и отзыва, а также журнал операций.
+
+При обновлении существующей установки добавьте право переименования для
+пользователя веб-админки в операционной MySQL.
+
+```sql
+GRANT UPDATE (label) ON matrix.access_keys TO 'matrix_web_admin'@'%';
+```
+
+Соберите образы, примените миграцию и обновите API и веб-админку.
+
+```bash
+matrix_compose --profile admin build api web-admin
+matrix_compose --profile admin run --rm migrate
+matrix_compose --profile admin up -d --no-deps api web-admin
+```
 
 ## Административный CRUD
 

@@ -1,4 +1,5 @@
 import { formatDatabaseCatalog, readDatabaseCatalog } from './catalog.mjs'
+import { sendStream } from '../../core/streams.mjs'
 
 export const catalogModule = {
   id: 'catalog',
@@ -7,18 +8,10 @@ export const catalogModule = {
       ? async () => formatDatabaseCatalog(await repository.catalogRows())
       : () => readDatabaseCatalog(settings.databaseCatalogPath)
     server.addService(loadService('database_all.proto', 'database_all.DatabaseAll'), {
-      streamDatabaseAll: rpc.stream('catalog', 'StreamDatabaseAll', async call => {
+      streamDatabaseAll: rpc.stream('catalog', 'StreamDatabaseAll', call => sendStream(call, async function* () {
         const { databases } = await readCatalog()
-        for (const database of databases) {
-          if (call.cancelled || call.destroyed) return
-          if (call.write(database.list)) continue
-          await new Promise(resolve => {
-            const resume = () => { call.off('drain', resume); call.off('cancelled', resume); resolve() }
-            call.once('drain', resume); call.once('cancelled', resume)
-          })
-        }
-        if (!call.cancelled && !call.destroyed) call.end()
-      }),
+        for (const database of databases) yield database.list
+      })),
     })
   },
 }

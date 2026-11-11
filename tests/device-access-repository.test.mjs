@@ -83,3 +83,63 @@ test('a proof that expires while waiting for the row lock cannot authorize', asy
   assert.deepEqual(actions.slice(-2), ['rollback', 'release'])
   assert.ok(!actions.some(action => action.sql?.startsWith('INSERT')))
 })
+
+test('rename changes only the label and handles unchanged and missing keys', async () => {
+  const id = '18446744073709551615'
+  const { actions, pool } = poolWithResponses([
+    { affectedRows: 1 }, { affectedRows: 0 }, [{ label: 'Сотрудник' }], { affectedRows: 0 }, [],
+  ])
+  const repository = new DeviceAccessRepository(pool)
+  assert.deepEqual(await repository.rename(id, ' Сотрудник '), { id, label: 'Сотрудник' })
+  assert.deepEqual(await repository.rename(id, 'Сотрудник'), { id, label: 'Сотрудник' })
+  assert.equal(await repository.rename('3', 'Missing'), null)
+  await assert.rejects(repository.rename(id, 'bad\nlabel'), { code: 3 })
+  await assert.rejects(repository.rename('18446744073709551616', 'Valid'), { code: 3 })
+  assert.equal(actions.length, 5)
+  assert.match(actions[0].sql, /^UPDATE `access_keys` SET `label` = \? WHERE `id` = CAST\(\? AS UNSIGNED\)$/)
+  assert.deepEqual(actions[0].params, ['Сотрудник', id])
+})
+
+test('log page filters and advances by exact unsigned ID while returning only a bounded page', async () => {
+  const id = '18446744073709551615'
+  const before = '18446744073709551614'
+  const from = '2026-11-11 00:00:00'
+  const first = { id: '18446744073709551613', access_key_id: id, label: 'Operator', status_code: 7 }
+  const next = { id: '18446744073709551612', access_key_id: id, label: 'Operator', status_code: 16 }
+  const { actions, pool } = poolWithResponses([[first, next], [next]])
+  const repository = new DeviceAccessRepository(pool)
+  assert.deepEqual(await repository.logPage({ id, before, from, method: 'GetIndexStatus', result: 'error', limit: 1 }), {
+    logs: [first], nextCursor: first.id,
+  })
+  assert.deepEqual(await repository.logPage({ before: first.id, limit: 1 }), { logs: [next], nextCursor: null })
+  assert.match(actions[0].sql, /l\.`access_key_id` = CAST\(\? AS UNSIGNED\)/)
+  assert.match(actions[0].sql, /l\.`id` < CAST\(\? AS UNSIGNED\)/)
+  assert.match(actions[0].sql, /l\.`status_code` NOT IN \(0, 1\)/)
+  assert.match(actions[0].sql, /ORDER BY l\.`id` DESC LIMIT \?/)
+  assert.doesNotMatch(actions[0].sql, /key_digest|device_key|nonce/)
+  assert.deepEqual(actions[0].params, [id, from, 'GetIndexStatus', before, 2])
+  assert.deepEqual(actions[1].params, [first.id, 2])
+})
+
+test('analytics converts aggregate values while preserving bigint key IDs', async () => {
+  const id = '18446744073709551615'
+  const from = '2026-11-11 00:00:00'
+  const { actions, pool } = poolWithResponses([
+    [{ total: '4', bound: '2', pending: '1', revoked: '1' }],
+    [{ requests: '3', errors: '1', activeKeys: '1', averageMs: '12.5000' }],
+    [{ day: '2026-11-11', requests: '3', errors: '1' }],
+    [{ id, label: 'Operator', requests: '3', errors: '1' }],
+  ])
+  assert.deepEqual(await new DeviceAccessRepository(pool).analytics(from), {
+    keys: { total: 4, bound: 2, pending: 1, revoked: 1 },
+    totals: { requests: 3, errors: 1, activeKeys: 1, averageMs: 12.5 },
+    daily: [{ day: '2026-11-11', requests: 3, errors: 1 }],
+    topKeys: [{ id, label: 'Operator', requests: 3, errors: 1 }],
+  })
+  assert.deepEqual(actions.map(action => action.params), [[], [from], [from], [from]])
+  for (const { sql } of actions.slice(1)) {
+    assert.match(sql, /WHERE `created_at` >= \?/)
+    assert.match(sql, /`status_code` NOT IN \(0, 1\)/)
+    assert.doesNotMatch(sql, /key_digest|device_key|nonce/)
+  }
+})
