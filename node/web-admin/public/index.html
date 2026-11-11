@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Управление доступом Matrix</title>
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <strong>Matrix</strong>
+        <span class="brand-context">Управление доступом</span>
+      </div>
+      <button class="button" id="logout" type="button" hidden>Выйти</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <p class="boot muted" id="checking" role="status">Проверяем сеанс…</p>
+    <section class="login panel" id="login" aria-labelledby="login-title" hidden>
+      <h1 id="login-title">Вход в админку</h1>
+      <form id="login-form" class="stack">
+        <label for="password">Пароль администратора</label>
+        <input id="password" type="password" autocomplete="current-password" required maxlength="512">
+        <p class="notice error" id="login-error" role="alert" hidden></p>
+        <button class="button primary" type="submit">Войти</button>
+      </form>
+    </section>
+
+    <section id="dashboard" aria-labelledby="page-title" hidden>
+      <div class="page-heading">
+        <h1 id="page-title" tabindex="-1">Ключи доступа</h1>
+        <div class="actions">
+          <button class="button" id="refresh" type="button">Обновить</button>
+          <button class="button primary" id="open-issue" type="button">Выпустить ключ</button>
+        </div>
+      </div>
+      <p class="notice" id="dashboard-notice" role="status" hidden></p>
+
+      <div class="workspace">
+        <section class="panel key-panel" aria-labelledby="keys-title">
+          <div class="panel-heading">
+            <h2 id="keys-title">Список ключей</h2>
+            <span class="count" id="key-count" hidden></span>
+          </div>
+          <p class="panel-message muted" id="key-message" role="status">Загружаем ключи…</p>
+          <ul class="key-list" id="key-list" aria-labelledby="keys-title"></ul>
+        </section>
+
+        <section class="panel detail-panel" aria-labelledby="journal-title">
+          <div class="panel-heading">
+            <h2 id="journal-title">Журнал ключа</h2>
+            <span class="count" id="log-count" hidden></span>
+          </div>
+          <p class="panel-message muted" id="no-selection">Выберите ключ в списке, чтобы посмотреть журнал.</p>
+          <div id="key-detail" hidden>
+            <div class="key-detail-header">
+              <div class="key-detail-title">
+                <h3 id="selected-label"></h3>
+                <span class="key-id" id="selected-id"></span>
+              </div>
+              <span id="selected-status"></span>
+            </div>
+            <div class="key-detail-meta">
+              <dl class="facts">
+                <div><dt>Выпущен</dt><dd id="created-at"></dd></div>
+                <div><dt>Привязан</dt><dd id="activated-at"></dd></div>
+                <div id="revoked-fact" hidden><dt>Отозван</dt><dd id="revoked-at"></dd></div>
+              </dl>
+              <button class="button danger-quiet" id="open-revoke" type="button">Отозвать ключ</button>
+            </div>
+            <p class="panel-message muted log-message" id="log-message" role="status" hidden></p>
+            <div class="journal" id="journal" hidden>
+              <table>
+                <caption class="sr-only">Операции выбранного ключа</caption>
+                <thead><tr><th scope="col">Время</th><th scope="col">Операция</th><th scope="col">Результат</th><th scope="col">Время запроса</th></tr></thead>
+                <tbody id="log-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="issue-dialog" aria-labelledby="issue-title">
+    <div class="dialog-body">
+      <h2 id="issue-title">Выпустить ключ</h2>
+      <form id="issue-form" class="stack">
+        <label for="key-label">Название ключа</label>
+        <input id="key-label" type="text" required maxlength="255" placeholder="Например, имя сотрудника">
+        <p class="notice error" id="issue-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="button" id="cancel-issue" type="button">Отмена</button>
+          <button class="button primary" type="submit">Выпустить ключ</button>
+        </div>
+      </form>
+      <div id="issued-view" class="stack" hidden>
+        <p class="muted">Скопируйте ключ перед закрытием. Он показывается один раз.</p>
+        <label for="issued-key">API-ключ</label>
+        <input id="issued-key" class="secret" type="text" readonly autocomplete="off" spellcheck="false">
+        <p class="copy-feedback muted" id="copy-feedback" role="status" hidden></p>
+        <div class="dialog-actions">
+          <button class="button" id="close-issued" type="button">Готово</button>
+          <button class="button primary" id="copy-key" type="button">Скопировать ключ</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="revoke-dialog" aria-labelledby="revoke-title">
+    <div class="dialog-body">
+      <h2 id="revoke-title">Отозвать ключ?</h2>
+      <p class="revoke-name" id="revoke-label"></p>
+      <p class="muted">Сервер будет отклонять новые запросы с этим ключом.</p>
+      <form id="revoke-form">
+        <p class="notice error" id="revoke-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="button" id="cancel-revoke" type="button" autofocus>Отмена</button>
+          <button class="button danger" type="submit">Отозвать ключ</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+</body>
+</html>

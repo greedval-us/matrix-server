@@ -26,6 +26,8 @@ deployment-config/
 !.env.example
 !.env.*.example
 *.env
+password.hash
+db-password
 *.key
 *.pem
 *.p12

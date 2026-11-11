@@ -12,7 +12,7 @@ const contentRules = [
   ['personal mounted path', /\/(?:media|home|Users)\/[a-z0-9_.-]+\//i],
   ['private key material', /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/],
 ];
-const localFile = /(?:^|\/)(?:\.env(?:\..*)?|id_(?:rsa|ed25519)(?:\.pub)?)$|\.(?:env|key|pem|crt|cer|der|p12|pfx|jks|keystore)$/i;
+const localFile = /(?:^|\/)(?:\.env(?:\..*)?|id_(?:rsa|ed25519)(?:\.pub)?|password\.hash|db-password)$|\.(?:env|key|pem|crt|cer|der|p12|pfx|jks|keystore)$/i;
 const environmentTemplate = /(?:^|\/)\.env(?:\.[^/]+)?\.(?:example|sample|template)$/i;
 const privateComposeFile = /(?:^|\/)compose\.(?:server|override|[^/]+\.local)\.ya?ml$/i;
 const privateDeploymentPath = /(?:^|\/)deployment-config(?:\/|$)/i;

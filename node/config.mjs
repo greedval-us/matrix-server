@@ -20,11 +20,14 @@ function secret(environment, name) {
 }
 
 export function readSettings(environment = process.env) {
+  const authMode = String(environment.MATRIX_AUTH_MODE ?? 'shared').trim()
+  if (!['shared', 'device'].includes(authMode)) throw new Error('MATRIX_AUTH_MODE must be shared or device')
   const apiKey = secret(environment, 'MATRIX_API_KEY')
-  if (!apiKey) throw new Error('MATRIX_API_KEY must be configured')
+  if (authMode === 'shared' && !apiKey) throw new Error('MATRIX_API_KEY must be configured')
   const moduleIds = String(environment.MATRIX_MODULES ?? 'search,catalog').split(',').map(value => value.trim()).filter(Boolean)
   if (!moduleIds.length || new Set(moduleIds).size !== moduleIds.length || moduleIds.some(id => !modules.some(module => module.id === id))) throw new Error('MATRIX_MODULES contains an unknown or duplicate module')
   const mysql = environment.MATRIX_MYSQL_HOST ? readMysqlSettings(environment) : null
+  if (authMode === 'device' && !mysql) throw new Error('Device authorization requires operational MySQL')
   if (moduleIds.some(id => ['workspace', 'records'].includes(id)) && !mysql) throw new Error('workspace/records modules require operational MySQL (MATRIX_MYSQL_HOST)')
   const adminApiKey = secret(environment, 'MATRIX_ADMIN_API_KEY')
   if (moduleIds.includes('workspace') && !adminApiKey) throw new Error('MATRIX_ADMIN_API_KEY is required by the workspace module')
@@ -32,10 +35,11 @@ export function readSettings(environment = process.env) {
   const tlsCertPath = String(environment.MATRIX_GRPC_TLS_CERT ?? '').trim()
   const tlsKeyPath = String(environment.MATRIX_GRPC_TLS_KEY ?? '').trim()
   if (Boolean(tlsCertPath) !== Boolean(tlsKeyPath)) throw new Error('MATRIX_GRPC_TLS_CERT and MATRIX_GRPC_TLS_KEY must be configured together')
+  if (authMode === 'device' && !tlsCertPath) throw new Error('Device authorization requires TLS')
   return Object.freeze({
     grpcHost: environment.MATRIX_GRPC_HOST ?? '127.0.0.1',
     grpcPort: positiveInteger(environment, 'MATRIX_GRPC_PORT', 50051, 65535),
-    apiKey, adminApiKey, moduleIds: Object.freeze(moduleIds), mysql,
+    apiKey, adminApiKey, authMode, moduleIds: Object.freeze(moduleIds), mysql,
     recordsFileDirectory: path.resolve(environment.MATRIX_RECORDS_FILE_DIR ?? 'data/files'),
     manticoreUrl: String(environment.MANTICORE_URL ?? 'http://127.0.0.1:9308').replace(/\/+$/, ''),
     manticoreTable: environment.MANTICORE_TABLE ?? 'matrix_records',

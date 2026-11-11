@@ -105,7 +105,8 @@ services:
       <<: *mysql-environment
       MATRIX_MODULES: search,catalog,workspace,records
       MATRIX_RECORDS_FILE_DIR: /var/lib/matrix/files
-      MATRIX_API_KEY: ${MATRIX_API_KEY:?Set MATRIX_API_KEY}
+      MATRIX_AUTH_MODE: ${MATRIX_AUTH_MODE:-shared}
+      MATRIX_API_KEY: ${MATRIX_API_KEY:-}
       MATRIX_ADMIN_API_KEY: ${MATRIX_ADMIN_API_KEY:?Set a separate MATRIX_ADMIN_API_KEY}
       MATRIX_GRPC_HOST: 0.0.0.0
       MATRIX_GRPC_PORT: "50051"
@@ -142,6 +143,57 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  web-admin:
+    image: matrix-web-admin:local
+    build:
+      context: .
+      target: web-admin
+    profiles: [admin]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    environment:
+      MATRIX_MYSQL_HOST: mysql
+      MATRIX_MYSQL_PORT: "3306"
+      MATRIX_MYSQL_DATABASE: matrix
+      MATRIX_MYSQL_USER: ${MATRIX_WEB_ADMIN_DB_USER:-matrix_web_admin}
+      MATRIX_MYSQL_PASSWORD_FILE: /run/matrix/admin/db-password
+      MATRIX_MYSQL_CONNECTION_LIMIT: "4"
+      MATRIX_WEB_ADMIN_HOST: 0.0.0.0
+      MATRIX_WEB_ADMIN_PORT: "8443"
+      MATRIX_WEB_ADMIN_ALLOWED_CIDRS: ${MATRIX_WEB_ADMIN_ALLOWED_CIDRS:-}
+      MATRIX_WEB_ADMIN_TLS_CERT: ${MATRIX_WEB_ADMIN_TLS_CERT:-/run/matrix/tls/server.crt}
+      MATRIX_WEB_ADMIN_TLS_KEY: ${MATRIX_WEB_ADMIN_TLS_KEY:-/run/matrix/tls/server.key}
+      MATRIX_WEB_ADMIN_PASSWORD_HASH_FILE: /run/matrix/admin/password.hash
+    ports:
+      - "${MATRIX_WEB_ADMIN_BIND_HOST:-127.0.0.1}:${MATRIX_WEB_ADMIN_PUBLISHED_PORT:-8443}:8443"
+    volumes:
+      - type: bind
+        source: ${MATRIX_WEB_ADMIN_SECRETS_DIR:-./deployment-config/web-admin}
+        target: /run/matrix/admin
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MATRIX_WEB_ADMIN_TLS_DIR:-${MATRIX_TLS_DIR:-./docker/tls}}
+        target: /run/matrix/tls
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [backend, edge]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('node:net').connect(8443,'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>s.end());s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 4s
+      retries: 5
+      start_period: 10s
 
   indexer:
     <<: *manticore-image

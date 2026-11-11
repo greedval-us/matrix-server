@@ -19,6 +19,13 @@ export async function createApplication(settings, dependencies = {}) {
       await pool.execute('SELECT 1')
       repository = new OperationalRepository(pool, { catalogGuard: createCatalogGuard(settings.databaseCatalogPath) })
     }
+    let deviceRepository = dependencies.deviceRepository
+    if (settings.authMode === 'device' && !deviceRepository) {
+      if (!pool) throw new Error('Device authorization requires an operational MySQL connection')
+      await pool.execute('SELECT 1 FROM `access_keys`, `access_key_nonces`, `access_key_logs` LIMIT 0')
+      const { DeviceAccessRepository } = await import('./infrastructure/mysql/device-access.mjs')
+      deviceRepository = new DeviceAccessRepository(pool)
+    }
     const server = new grpc.Server({
       'grpc.max_receive_message_length': 1024 * 1024,
       'grpc.max_send_message_length': 32 * 1024 * 1024,
@@ -26,7 +33,7 @@ export async function createApplication(settings, dependencies = {}) {
       'grpc.keepalive_timeout_ms': 10_000,
     })
     const audit = createAuditLog(repository, dependencies.auditOptions)
-    const rpc = createRpcHandlers({ authorize: createAuthorizer(settings), audit })
+    const rpc = createRpcHandlers({ authorize: createAuthorizer(settings, { deviceRepository }), audit })
     for (const id of settings.moduleIds) {
       const module = modules.find(candidate => candidate.id === id)
       if (!module) throw new Error(`Unknown module: ${id}`)

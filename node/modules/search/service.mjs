@@ -60,9 +60,9 @@ export class SearchCapacity {
 }
 
 export class MatrixSearchService {
-  constructor(settings) {
+  constructor(settings, { requireSharedKey = true } = {}) {
     this.settings = settings
-    this.expectedApiKey = apiKeyDigest(settings.apiKey)
+    this.expectedApiKey = requireSharedKey ? apiKeyDigest(settings.apiKey) : null
     this.capacity = new SearchCapacity(settings.maxConcurrentSearches)
     this.manticore = new ManticoreClient({
       baseUrl: settings.manticoreUrl,
@@ -72,6 +72,7 @@ export class MatrixSearchService {
   }
 
   authorize(call) {
+    if (!this.expectedApiKey) return
     const supplied = call.metadata.get('x-api-key')[0] ?? ''
     if (!timingSafeEqual(apiKeyDigest(supplied), this.expectedApiKey)) {
       throw serviceError(grpc.status.UNAUTHENTICATED, 'Invalid API key')

@@ -119,10 +119,15 @@ export class OperationalRepository {
     return this.execute(`SELECT ${CATALOG_FIELDS.map(quoted).join(', ')} FROM \`data_base\` ORDER BY \`id\``)
   }
 
-  async appendLog({ module, method, statusCode, durationMs }) {
+  async appendLog({ module, method, statusCode, durationMs, accessKeyId }) {
     if (![module, method].every(value => typeof value === 'string' && /^[A-Za-z0-9_.\/]{1,128}$/.test(value))
       || !Number.isInteger(statusCode) || statusCode < 0 || statusCode > 16
       || !Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > 4294967295) throw invalid()
+    if (accessKeyId != null) {
+      const keyId = idValue(accessKeyId, 'access_key_logs')
+      await this.execute('INSERT INTO `access_key_logs` (`access_key_id`, `module`, `method`, `status_code`, `duration_ms`) VALUES (?, ?, ?, ?, ?)', [keyId, module, method, statusCode, durationMs])
+      return
+    }
     await this.execute('INSERT INTO `service_logs` (`module`, `method`, `status_code`, `duration_ms`) VALUES (?, ?, ?, ?)', [module, method, statusCode, durationMs])
   }
 }

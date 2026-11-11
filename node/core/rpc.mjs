@@ -6,38 +6,51 @@ export function createRpcHandlers({ authorize, audit }) {
   function completion(module, method) {
     const started = performance.now()
     let finished = false
-    return statusCode => {
-      if (finished) return
-      finished = true
-      audit.record({ module, method, statusCode, durationMs: Math.max(0, Math.round(performance.now() - started)) })
+    let accessKeyId
+    return {
+      identify(principal) { accessKeyId = principal?.accessKeyId },
+      finish(statusCode) {
+        if (finished) return
+        finished = true
+        const metadata = { module, method, statusCode, durationMs: Math.max(0, Math.round(performance.now() - started)) }
+        if (accessKeyId) metadata.accessKeyId = accessKeyId
+        audit.record(metadata)
+      },
     }
   }
   return {
     unary(module, method, handler, access = 'search') {
       return async (call, callback) => {
-        const complete = completion(module, method)
+        const request = completion(module, method)
         try {
-          authorize(call, access)
+          request.identify(await authorize(call, access))
+          if (call.cancelled) {
+            request.finish(grpc.status.CANCELLED)
+            return
+          }
           const response = await handler(call.request, call)
           callback(null, response)
-          complete(grpc.status.OK)
+          request.finish(grpc.status.OK)
         } catch (error) {
           const safe = toRpcError(error)
           callback(safe)
-          complete(safe.code)
+          request.finish(safe.code)
         }
       }
     },
     stream(module, method, handler, access = 'search') {
       return async call => {
-        const complete = completion(module, method)
-        call.once('finish', () => complete(grpc.status.OK))
-        call.once('cancelled', () => complete(grpc.status.CANCELLED))
-        call.once('error', error => complete(error.code ?? grpc.status.INTERNAL))
-        try { authorize(call, access); await handler(call) }
-        catch (error) {
+        const request = completion(module, method)
+        call.once('finish', () => request.finish(grpc.status.OK))
+        call.once('cancelled', () => request.finish(grpc.status.CANCELLED))
+        call.once('error', error => request.finish(error.code ?? grpc.status.INTERNAL))
+        try {
+          request.identify(await authorize(call, access))
+          if (call.cancelled || call.destroyed) return
+          await handler(call)
+        } catch (error) {
           const safe = toRpcError(error)
-          complete(safe.code)
+          request.finish(safe.code)
           call.emit('error', safe)
         }
       }

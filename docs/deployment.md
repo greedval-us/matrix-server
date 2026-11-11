@@ -246,13 +246,101 @@ ID и отказывается работать с непустым целевы
 `npm run catalog:copy` после `npm run migrate`; обе читают `.env`, если он существует.
 Для источника задайте отдельные `SOURCE_MYSQL_*`, для цели — `MATRIX_MYSQL_*`.
 
+## Персональные ключи устройств
+
+В режиме `shared` клиент использует общий `MATRIX_API_KEY` из закрытого `runtime.env`.
+Чтобы перейти на персональные ключи, примените миграции операционной MySQL,
+включите TLS и задайте `MATRIX_AUTH_MODE=device` в `runtime.env`. В этом режиме
+клиентам выдаются ключи устройств. `MATRIX_ADMIN_API_KEY` используется для
+административного API Workspace.
+
+Администратор может выпускать и отзывать ключи командами внутри контейнера API.
+
+```bash
+matrix_compose exec api node scripts/access-keys.mjs issue "Имя пользователя"
+matrix_compose exec api node scripts/access-keys.mjs list
+matrix_compose exec api node scripts/access-keys.mjs logs ID_КЛЮЧА
+matrix_compose exec api node scripts/access-keys.mjs revoke ID_КЛЮЧА
+```
+
+Передайте пользователю ключ из вывода `issue`. Сервер сохраняет хеш ключа и
+показывает его секретное значение только при выпуске. Пользователь вводит адрес
+и ключ в Matrix. Первый запрос с действительной подписью привязывает ключ к
+устройству. «Проверить соединение» тоже выполняет такой запрос, поэтому
+пользователь делает эту проверку на своём компьютере. Для переноса доступа
+отзовите прежний ключ и выпустите новый.
+
+Журнал `access_key_logs` связывает запросы с ID ключа. В нём сохраняются время,
+операция, статус и длительность. Команда `list` показывает ID ключей, `logs`
+выводит до 1000 последних событий по указанному ID.
+
+## Веб-админка ключей
+
+Сервис `web-admin` запускается отдельным контейнером из профиля `admin`. Он
+читает статусы и журналы ключей из операционной MySQL. Перед запуском примените
+миграции, включая `006_device_access_keys.sql`.
+
+Во внешнем `runtime.env` задайте `MATRIX_WEB_ADMIN_SECRETS_DIR` с абсолютным путём
+к закрытому каталогу, `MATRIX_WEB_ADMIN_DB_USER` с именем пользователя MySQL и,
+при необходимости, `MATRIX_WEB_ADMIN_TLS_DIR` с каталогом сертификатов. Внутри
+контейнера TLS использует `/run/matrix/tls/server.crt` и `/run/matrix/tls/server.key`.
+Эти пути можно заменить переменными `MATRIX_WEB_ADMIN_TLS_CERT` и
+`MATRIX_WEB_ADMIN_TLS_KEY`. Браузер должен доверять CA выбранного сертификата.
+
+По умолчанию порт `8443` привязан к loopback хоста. Для доступа из локальной сети
+задайте `MATRIX_WEB_ADMIN_BIND_HOST` с адресом нужного интерфейса и
+`MATRIX_WEB_ADMIN_ALLOWED_CIDRS` со списком разрешённых подсетей через запятую.
+Внешний порт задаёт `MATRIX_WEB_ADMIN_PUBLISHED_PORT`.
+
+Создайте отдельного пользователя MySQL с правами на ключи и их журнал. Имя и БД
+в примере должны совпадать с параметрами вашего контейнера.
+
+```sql
+CREATE USER 'matrix_web_admin'@'%' IDENTIFIED BY 'replace-with-random-password';
+GRANT SELECT (id, label, created_at, activated_at, revoked_at),
+      INSERT (label, key_digest), UPDATE (revoked_at)
+      ON matrix.access_keys TO 'matrix_web_admin'@'%';
+GRANT SELECT ON matrix.access_key_logs TO 'matrix_web_admin'@'%';
+```
+
+Сохраните пароль MySQL в `db-password`, а хеш пароля входа в `password.hash` в
+закрытом каталоге `MATRIX_WEB_ADMIN_SECRETS_DIR`. Для подготовки хеша на хосте
+с Docker можно использовать образ самого сервиса.
+
+```bash
+matrix_compose --profile admin build web-admin
+umask 077
+read -rs -p 'Пароль входа в веб-админку ' web_admin_password
+printf '\n'
+printf '%s' "$web_admin_password" | docker run --rm -i matrix-web-admin:local \
+  node scripts/hash-web-admin-password.mjs > "$MATRIX_WEB_ADMIN_SECRETS_DIR/password.hash"
+unset web_admin_password
+```
+
+Перед запуском проверьте права обоих файлов и каталога. В обычном Docker на
+Linux можно выдать право чтения группе пользователя `node` внутри контейнера.
+
+```bash
+web_admin_gid=$(docker run --rm matrix-web-admin:local id -g)
+sudo chgrp "$web_admin_gid" "$MATRIX_WEB_ADMIN_SECRETS_DIR" \
+  "$MATRIX_WEB_ADMIN_SECRETS_DIR/db-password" "$MATRIX_WEB_ADMIN_SECRETS_DIR/password.hash"
+sudo chmod 0750 "$MATRIX_WEB_ADMIN_SECRETS_DIR"
+sudo chmod 0640 "$MATRIX_WEB_ADMIN_SECRETS_DIR/db-password" "$MATRIX_WEB_ADMIN_SECRETS_DIR/password.hash"
+matrix_compose --profile admin up -d --no-deps web-admin
+```
+
+В этом примере переменная `MATRIX_WEB_ADMIN_SECRETS_DIR` также задаётся в текущей
+оболочке для записи файла. `--no-deps` подходит, когда MySQL уже работает и миграции
+применены. Откройте HTTPS-адрес, заданный при развёртывании. После выпуска ключа
+скопируйте его в момент выдачи. В списке остаются ID, название, время создания,
+привязки и отзыва, а также журнал операций.
+
 ## Административный CRUD
 
 Контракт `protos/workspace.proto` описывает сервис `matrix.workspace.v1.Workspace`.
 Методы: `ListRows`, `GetRow`, `CreateRow`, `UpdateRow`, `DeleteRow`. Передавайте
-административный ключ в metadata `x-api-key` из защищённой настройки клиента;
-не помещайте ключ в аргументы командной строки или JSON запроса. Поисковый ключ
-для этих методов не подходит.
+административный ключ в metadata `x-api-key` из защищённой конфигурации
+административного сервиса. Храните ключ отдельно от тела запроса и аргументов команды.
 
 `resource` допускает только `data_base`, `work_items`, `service_logs`. `Row` имеет
 `id:string` и `values:map<string,string>`: даже числа, флаги и JSON передаются строками.

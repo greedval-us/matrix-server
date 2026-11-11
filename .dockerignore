@@ -25,6 +25,8 @@ venv
 **/.env
 **/.env.*
 **/*.env
+**/password.hash
+**/db-password
 **/*.key
 **/*.pem
 **/*.p12

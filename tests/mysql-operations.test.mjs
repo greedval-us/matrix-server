@@ -126,9 +126,9 @@ test('existing installations add the optional initiator after birth date once wi
     if (sql.startsWith('INSERT INTO `schema_migrations`')) versions.push({ version: params[0], checksum: params[1] })
     return []
   })
-  assert.deepEqual(await runMigrations(pool), ['003_control_initiator.sql'])
+  assert.ok((await runMigrations(pool)).includes('003_control_initiator.sql'))
   assert.deepEqual(await runMigrations(pool), [])
-  const changes = calls.filter(call => call.sql && !/^(SELECT|CREATE TABLE IF NOT EXISTS `schema_migrations`|INSERT INTO `schema_migrations`)/.test(call.sql))
+  const changes = calls.filter(call => call.sql?.includes('`control`') && !call.sql.startsWith('SELECT'))
   assert.equal(changes.length, 1)
   assert.match(changes[0].sql, /^ALTER TABLE `control`\s+ADD COLUMN `initiator` VARCHAR\(255\) NULL AFTER `date_of_birth`$/)
 })

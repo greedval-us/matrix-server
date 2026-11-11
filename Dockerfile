@@ -7,11 +7,16 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node node ./node
 COPY --chown=node:node protos ./protos
 COPY --chown=node:node migrations ./migrations
-COPY --chown=node:node scripts/migrate.mjs scripts/copy_catalog.mjs ./scripts/
+COPY --chown=node:node scripts/migrate.mjs scripts/copy_catalog.mjs scripts/access-keys.mjs ./scripts/
 RUN mkdir -p /var/lib/matrix/files && chown node:node /var/lib/matrix/files
 USER node
 EXPOSE 50051
 CMD ["node", "node/main.mjs"]
+
+FROM api AS web-admin
+COPY --chown=node:node scripts/hash-web-admin-password.mjs ./scripts/
+EXPOSE 8443
+CMD ["node", "node/web-admin/main.mjs"]
 
 # searchd, indexer and indextool must use the same release in both Compose roles.
 FROM manticoresearch/manticore:29.9.0 AS manticore

@@ -36,6 +36,8 @@ const privateLocalFiles = [
   '.env.runtime',
   'runtime.env',
   'nested/runtime.env',
+  'web-admin/password.hash',
+  'web-admin/db-password',
   'tls/server.der',
   'tls/id_rsa.pub',
   '.cache/operation.txt',
