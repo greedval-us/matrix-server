@@ -30,14 +30,17 @@ async function repository(responses = [], failures = {}) {
 }
 
 test('list returns all explicit display fields and independent attachment metadata without bigint loss', async () => {
-  const { repo, calls } = await repository([[rawRow({ files: JSON.stringify([FILE_A]) })], [{ total: '9007199254740995' }]])
+  const { repo, calls } = await repository([[rawRow({ source_id: '0007', date_of_birth: 'около 1990 г.',
+    group_chat_locality: 'Группа', files: JSON.stringify([FILE_A]) })], [{ total: '9007199254740995' }]])
   const page = await repo.list({})
   assert.deepEqual(page.columns, [
     { key: 'date', label: 'Дата', type: 'date', sortable: true },
     { key: 'id', label: 'ID', type: 'text', sortable: true },
+    { key: 'source_id', label: 'Telegram ID', type: 'text', sortable: true },
     { key: 'number', label: 'Номер', type: 'text', sortable: true },
     { key: 'fio', label: 'ФИО', type: 'text', sortable: true },
-    { key: 'date_of_birth', label: 'Дата рождения', type: 'date', sortable: true },
+    { key: 'date_of_birth', label: 'Дата рождения', type: 'text', sortable: true },
+    { key: 'group_chat_locality', label: 'Группа, чат, н.п.', type: 'text', sortable: true },
     { key: 'initiator', label: 'Инициатор', type: 'text', sortable: true },
     { key: 'executor', label: 'Исполнитель', type: 'text', sortable: true },
     { key: 'note', label: 'Примечание', type: 'text', sortable: true },
@@ -45,7 +48,8 @@ test('list returns all explicit display fields and independent attachment metada
     { key: 'intersections', label: 'Пересечения', type: 'text', sortable: true },
   ])
   assert.deepEqual(page.rows, [{ id: '9007199254740993', values: { date: '2026-11-05', id: '9007199254740993',
-    number: '+007', fio: 'Иванов И.И.', date_of_birth: '', initiator: 'Заявитель', executor: 'Оператор', note: '', realization: '', intersections: '' }, files: [FILE_A] }])
+    source_id: '0007', number: '+007', fio: 'Иванов И.И.', date_of_birth: 'около 1990 г.',
+    group_chat_locality: 'Группа', initiator: 'Заявитель', executor: 'Оператор', note: '', realization: '', intersections: '' }, files: [FILE_A] }])
   assert.equal(page.total, '9007199254740995')
   assert.match(calls[0].sql, /ORDER BY `date` DESC, `id` DESC LIMIT \? OFFSET \?$/)
   assert.deepEqual(calls[0].params, [100, 0])
@@ -57,14 +61,15 @@ test('literal global search covers every display field before sorting and paging
   await repo.list({ query, sort_key: 'initiator', sort_direction: 'asc', page: 3, page_size: 20 })
   const [select, count] = calls
   assert.ok(!select.sql.includes(query))
-  for (const field of ['date', 'id', 'number', 'fio', 'date_of_birth', 'initiator', 'executor', 'note', 'realization', 'intersections']) {
+  for (const field of ['date', 'id', 'source_id', 'number', 'fio', 'date_of_birth', 'group_chat_locality',
+    'initiator', 'executor', 'note', 'realization', 'intersections']) {
     assert.match(select.sql.slice(select.sql.indexOf(' WHERE ')), new RegExp('`' + field + '`[^?]*LIKE \\?'))
   }
   assert.match(select.sql, /WHERE .* ORDER BY `initiator` ASC, `id` ASC LIMIT \? OFFSET \?$/)
-  assert.deepEqual(select.params, [...Array(10).fill("%50=%=_==' OR 1==1%"), 20, 40])
-  assert.deepEqual(count.params, Array(10).fill("%50=%=_==' OR 1==1%"))
+  assert.deepEqual(select.params, [...Array(12).fill("%50=%=_==' OR 1==1%"), 20, 40])
+  assert.deepEqual(count.params, Array(12).fill("%50=%=_==' OR 1==1%"))
   assert.equal(select.sql.split(' WHERE ')[1].split(' ORDER BY ')[0], count.sql.split(' WHERE ')[1])
-  assert.equal((select.sql.match(/ESCAPE '='/g) ?? []).length, 10)
+  assert.equal((select.sql.match(/ESCAPE '='/g) ?? []).length, 12)
 })
 
 test('proto defaults select the first page and ID sort has no contradictory tiebreaker', async () => {
@@ -111,7 +116,7 @@ test('initiator is optional, roundtrips as plain text and can be cleared without
   assert.equal(created.values.executor, 'Оператор')
   assert.equal(calls[0].sql, 'INSERT INTO `control` (`initiator`, `executor`) VALUES (?, ?)')
   assert.deepEqual(calls[0].params, [initiator, 'Оператор'])
-  assert.match(calls[1].sql, /`date_of_birth`, `initiator`, `executor`/)
+  assert.match(calls[1].sql, /`date_of_birth`, `group_chat_locality`, `initiator`, `executor`/)
   const cleared = await repo.update('1', { initiator: '' })
   assert.equal(cleared.values.initiator, '')
   assert.equal(cleared.values.executor, 'Оператор')
@@ -120,14 +125,26 @@ test('initiator is optional, roundtrips as plain text and can be cleared without
   assert.equal((await repo.get('2')).values.initiator, '')
 })
 
-test('empty create relies on database date defaults while blank dates bind NULL', async () => {
+test('Telegram ID, plain-text birth date and locality are writable without changing record IDs or files', async () => {
+  const fields = { source_id: '0007', date_of_birth: 'около 1990 г.', group_chat_locality: 'Группа' }
+  const id = '9007199254740993'
+  const { repo, calls } = await repository([{ affectedRows: 1 }, [rawRow({ ...fields, files: [FILE_A] })]])
+  const saved = await repo.update(id, fields)
+  assert.equal(saved.id, id)
+  assert.deepEqual(saved.files, [FILE_A])
+  for (const [key, value] of Object.entries(fields)) assert.equal(saved.values[key], value)
+  assert.match(calls[0].sql, /^UPDATE `control` SET `source_id` = \?, `date_of_birth` = \?, `group_chat_locality` = \? WHERE `id` = \?$/)
+  assert.deepEqual(calls[0].params, [...Object.values(fields), id])
+})
+
+test('empty create relies on database date defaults while a blank record date binds NULL', async () => {
   const { repo, calls } = await repository([{ insertId: '1' }, [rawRow({ id: '1' })],
     { insertId: '2' }, [rawRow({ id: '2', date: null })]])
   await repo.create({})
   assert.match(calls[0].sql, /^INSERT INTO `control` \(\) VALUES \(\)$/)
   assert.deepEqual(calls[0].params, [])
   await repo.create({ date: '', date_of_birth: '' })
-  assert.deepEqual(calls[2].params, [null, null])
+  assert.deepEqual(calls[2].params, [null, ''])
 })
 
 test('writes reject immutable fields, nonstrings, impossible calendar dates and byte or character overflow', async () => {
@@ -135,6 +152,7 @@ test('writes reject immutable fields, nonstrings, impossible calendar dates and 
   const invalid = [{ id: '1' }, { files: '[]' }, { unknown: '' }, { note: null }, { number: 'x'.repeat(65) },
     { fio: '😀'.repeat(256) }, { initiator: '😀'.repeat(256) }, { initiator: null }, { executor: 'я'.repeat(256) }, { note: 'я'.repeat(32768) },
     { realization: 'x'.repeat(65536) }, { intersections: '😀'.repeat(16384) },
+    { birth_date_text: '' }, { date_of_birth: 'я'.repeat(32768) },
     ...['2025-02-29', '2024-04-31', '0999-01-01', '2024-2-03', '0000-00-00', '2024-01-01T00:00:00Z'].map(date => ({ date }))]
   for (const values of invalid) {
     await assert.rejects(repo.create(values), { code: 3 })
@@ -146,9 +164,10 @@ test('writes reject immutable fields, nonstrings, impossible calendar dates and 
 
 test('valid leap dates, astral varchar boundaries and maximum TEXT bytes are accepted', async () => {
   const { repo, calls } = await repository([{ insertId: '3' }, [rawRow({ id: '3' })]])
-  await repo.create({ date: '2000-02-29', date_of_birth: '1000-01-01', number: '😀'.repeat(64),
+  await repo.create({ date: '2000-02-29', date_of_birth: '😀'.repeat(16383) + 'abc', number: '😀'.repeat(64),
     fio: '😀'.repeat(255), initiator: '😀'.repeat(255), executor: 'я'.repeat(255), note: 'x'.repeat(65535) })
   assert.equal(calls[0].params[0], '2000-02-29')
+  assert.equal(Buffer.byteLength(calls[0].params[1], 'utf8'), 65535)
   assert.equal(calls[0].params[3], '😀'.repeat(255))
   assert.equal(calls[0].params[4], '😀'.repeat(255))
 })

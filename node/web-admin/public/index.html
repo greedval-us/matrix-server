@@ -32,26 +32,40 @@
     </section>
 
     <section id="dashboard" aria-labelledby="page-title" hidden>
+      <nav class="dashboard-nav" aria-label="Разделы админки">
+        <button id="show-access" type="button" aria-pressed="true">Ключи и аналитика</button>
+        <button id="show-catalog" type="button" aria-pressed="false" aria-controls="catalog-view">Каталог баз</button>
+      </nav>
       <div class="page-heading">
         <h1 id="page-title" tabindex="-1">Управление доступом</h1>
-        <div class="actions">
+        <div class="actions" data-dashboard-view="access">
           <button class="button" id="refresh" type="button">Обновить</button>
           <button class="button primary" id="open-issue" type="button">Выпустить ключ</button>
         </div>
       </div>
-      <p class="notice" id="dashboard-notice" role="status" hidden></p>
+      <div data-dashboard-view="access">
+        <p class="notice" id="dashboard-notice" role="status" hidden></p>
+      </div>
 
-      <section class="panel overview" aria-labelledby="analytics-title">
-        <div class="panel-heading">
+      <section class="panel overview" aria-labelledby="analytics-title" data-dashboard-view="access">
+        <div class="panel-heading analytics-heading">
           <h2 id="analytics-title">Аналитика</h2>
-          <label class="period-select">
-            <span class="sr-only">Период аналитики</span>
-            <select id="analytics-days">
-              <option value="1">Сегодня (UTC)</option>
-              <option value="7" selected>7 дней</option>
-              <option value="30">30 дней</option>
-            </select>
-          </label>
+          <div class="analytics-filters">
+            <label>
+              <span>Владелец</span>
+              <select id="analytics-owner" disabled>
+                <option value="">Все владельцы</option>
+              </select>
+            </label>
+            <label>
+              <span>Период аналитики</span>
+              <select id="analytics-days">
+                <option value="1">Сегодня (UTC)</option>
+                <option value="7" selected>7 дней</option>
+                <option value="30">30 дней</option>
+              </select>
+            </label>
+          </div>
         </div>
         <p class="panel-message muted" id="analytics-message" role="status">Загружаем аналитику…</p>
         <div id="analytics-content" hidden>
@@ -80,7 +94,7 @@
         </div>
       </section>
 
-      <div class="workspace">
+      <div class="workspace" data-dashboard-view="access">
         <section class="panel key-panel" aria-labelledby="keys-title">
           <div class="panel-heading">
             <h2 id="keys-title">Ключи доступа</h2>
@@ -91,9 +105,18 @@
             <div><dt>Ожидают</dt><dd id="key-pending"></dd></div>
             <div><dt>Отозваны</dt><dd id="key-revoked"></dd></div>
           </dl>
-          <div class="key-search">
+          <div class="key-filters">
             <label class="sr-only" for="key-search">Поиск ключа по имени или номеру</label>
             <input id="key-search" type="search" placeholder="Имя или номер ключа" autocomplete="off">
+            <label class="key-status-filter">
+              <span>Статус ключей</span>
+              <select id="key-status">
+                <option value="active" selected>Активные</option>
+                <option value="all">Все ключи</option>
+                <option value="unused">Не использованы</option>
+                <option value="revoked">Отозваны</option>
+              </select>
+            </label>
           </div>
           <p class="panel-message muted" id="key-message" role="status">Загружаем ключи…</p>
           <ul class="key-list" id="key-list" aria-labelledby="keys-title"></ul>
@@ -161,8 +184,103 @@
           </div>
         </section>
       </div>
+
+      <section class="panel" id="catalog-view" data-dashboard-view="catalog" aria-labelledby="page-title" hidden>
+        <div class="catalog-toolbar">
+          <form class="catalog-search-form" id="catalog-search-form" role="search" aria-label="Поиск базы">
+            <label class="sr-only" for="catalog-search">Название базы, таблица или ID</label>
+            <input id="catalog-search" type="search" placeholder="Название базы, таблица или ID" autocomplete="off">
+            <button class="button" type="submit">Найти</button>
+          </form>
+          <button class="button" id="catalog-types-open" type="button" aria-haspopup="dialog">Добавить тип</button>
+        </div>
+        <p class="notice catalog-notice" id="catalog-notice" role="status" hidden></p>
+        <p class="panel-message muted" id="catalog-message" role="status" hidden></p>
+        <div class="catalog-table" id="catalog-table" role="region" aria-label="Базы данных" tabindex="0" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th class="catalog-id" scope="col">ID</th>
+                <th scope="col">База</th>
+                <th class="catalog-extra" scope="col">Страна</th>
+                <th class="catalog-extra" scope="col">Тип</th>
+                <th class="catalog-action" scope="col"><span class="sr-only">Действия</span></th>
+              </tr>
+            </thead>
+            <tbody id="catalog-rows"></tbody>
+          </table>
+        </div>
+        <div class="journal-footer" id="catalog-pagination" hidden>
+          <span class="muted" id="catalog-count" role="status"></span>
+          <div class="actions">
+            <button class="button" id="catalog-prev" type="button">Назад</button>
+            <button class="button" id="catalog-next" type="button">Далее</button>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
+
+  <dialog class="catalog-dialog" id="catalog-edit-dialog" aria-labelledby="catalog-edit-title">
+    <div class="dialog-body">
+      <h2 id="catalog-edit-title">Редактировать базу</h2>
+      <form id="catalog-edit-form">
+        <p class="notice" id="catalog-edit-message" role="status" hidden></p>
+        <fieldset class="catalog-edit-fields" id="catalog-edit-fields" hidden>
+          <legend class="sr-only">Метаданные базы</legend>
+          <dl class="facts catalog-identity">
+            <div><dt>ID</dt><dd id="catalog-edit-id"></dd></div>
+            <div><dt>Имя таблицы</dt><dd id="catalog-edit-table"></dd></div>
+          </dl>
+          <label class="catalog-wide">
+            <span>Название базы</span>
+            <input id="catalog-field-name" name="name" type="text" autocomplete="off">
+          </label>
+          <label class="catalog-wide">
+            <span>Описание</span>
+            <textarea id="catalog-field-info" name="info" rows="4" maxlength="65535"></textarea>
+          </label>
+          <label>
+            <span>Дата актуальности</span>
+            <input id="catalog-field-relevance_date" name="relevance_date" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>Страна</span>
+            <input id="catalog-field-country" name="country" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>Тип</span>
+            <select id="catalog-field-type" name="type">
+              <option value="">Не указан</option>
+            </select>
+          </label>
+          <label>
+            <span>Достоверность</span>
+            <input id="catalog-field-trust" name="trust" type="text" autocomplete="off">
+          </label>
+        </fieldset>
+        <div class="dialog-actions">
+          <button class="button" id="catalog-edit-cancel" type="button">Отмена</button>
+          <button class="button primary" id="catalog-edit-save" type="submit" hidden>Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog id="catalog-types-dialog" aria-labelledby="catalog-types-title">
+    <div class="dialog-body">
+      <h2 id="catalog-types-title">Добавить тип базы</h2>
+      <form id="catalog-type-form" class="stack">
+        <label for="catalog-type-name">Название типа</label>
+        <input id="catalog-type-name" name="name" type="text" required autocomplete="off">
+        <p class="notice error" id="catalog-types-message" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="button" id="catalog-types-cancel" type="button">Отмена</button>
+          <button class="button primary" type="submit">Добавить</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
 
   <dialog id="issue-dialog" aria-labelledby="issue-title">
     <div class="dialog-body">

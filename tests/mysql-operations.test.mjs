@@ -80,6 +80,34 @@ test('catalog copy preserves ids and nulls, binds source values and commits atom
   assert.ok(calls.some(call => call.sql?.includes('RELEASE_LOCK')))
 })
 
+test('catalog copy resolves old type names and registers distinct new types in the same transaction', async () => {
+  const { copyCatalog } = await import('../scripts/copy_catalog.mjs')
+  const registry = new Map([['магазины', { name: 'Магазины', alias_for: 'Магазины и ритейл' }]])
+  const { pool, calls } = connectionFixture((sql, [name] = []) => {
+    if (sql.includes('GET_LOCK')) return [{ acquired: 1 }]
+    if (sql.startsWith('INSERT INTO `catalog_types`') && !registry.has(name.toLowerCase())) {
+      registry.set(name.toLowerCase(), { name, alias_for: null })
+    }
+    if (sql.startsWith('SELECT `name`, `alias_for`')) {
+      const row = registry.get(name.toLowerCase())
+      return row ? [row] : []
+    }
+    return []
+  })
+  const source = { async execute() { return [[
+    { id: '1', name_table: 'source_1', type: 'МАГАЗИНЫ' },
+    { id: '2', name_table: 'source_2', type: '  Новый   тип  ' },
+    { id: '3', name_table: 'source_3', type: 'новый тип' },
+  ], []] } }
+  assert.equal(await copyCatalog(source, pool), 3)
+  const inserted = calls.filter(call => call.sql?.startsWith('INSERT INTO `data_base`'))
+  const typeIndex = inserted[0].sql.split('(')[1].split(')')[0].split(', ').indexOf('`type`')
+  assert.deepEqual(inserted.map(call => call.params[typeIndex]), ['Магазины и ритейл', 'Новый тип', 'Новый тип'])
+  assert.deepEqual(calls.filter(call => call.sql?.startsWith('INSERT INTO `catalog_types`')).map(call => call.params),
+    [['МАГАЗИНЫ'], ['Новый тип'], ['новый тип']])
+  assert.ok(calls.some(call => call.action === 'commit'))
+})
+
 test('catalog copy rolls back all inserted rows on a later failure and releases its lock', async () => {
   const { copyCatalog } = await import('../scripts/copy_catalog.mjs')
   let inserts = 0
@@ -115,7 +143,7 @@ test('migrations record versions once, skip applied files and reject checksum dr
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
-test('existing installations add the optional initiator after birth date once without rewriting control data', async () => {
+test('existing installations apply each control column migration once without rewriting data', async () => {
   const { runMigrations } = await import('../scripts/migrate.mjs')
   const versions = await Promise.all(['001_operational.sql', '002_control.sql'].map(async version => ({
     version, checksum: createHash('sha256').update(await readFile(new URL(`../migrations/${version}`, import.meta.url))).digest('hex'),
@@ -126,9 +154,12 @@ test('existing installations add the optional initiator after birth date once wi
     if (sql.startsWith('INSERT INTO `schema_migrations`')) versions.push({ version: params[0], checksum: params[1] })
     return []
   })
-  assert.ok((await runMigrations(pool)).includes('003_control_initiator.sql'))
+  const applied = await runMigrations(pool)
+  assert.ok(applied.includes('003_control_initiator.sql'))
+  assert.ok(applied.includes('008_control_excel_fields.sql'))
   assert.deepEqual(await runMigrations(pool), [])
-  const changes = calls.filter(call => call.sql?.includes('`control`') && !call.sql.startsWith('SELECT'))
+  const changes = calls.filter(call => call.sql?.startsWith('ALTER TABLE `control`'))
   assert.equal(changes.length, 1)
   assert.match(changes[0].sql, /^ALTER TABLE `control`\s+ADD COLUMN `initiator` VARCHAR\(255\) NULL AFTER `date_of_birth`$/)
+  assert.equal(calls.filter(call => call.sql === 'EXECUTE matrix_control_excel_fields').length, 1)
 })

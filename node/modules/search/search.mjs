@@ -35,10 +35,13 @@ export class SearchCapacity {
 }
 
 export class SearchService {
-  constructor(settings, { manticore, readCatalog = readDatabaseCatalog, readStatus = readIndexStatus } = {}) {
+  constructor(settings, { manticore, readCatalog = readDatabaseCatalog, readStatus = readIndexStatus,
+    readSourceMetadata, readFieldLabels } = {}) {
     this.settings = settings
     this.readCatalog = readCatalog
     this.readStatus = readStatus
+    this.readSourceMetadata = readSourceMetadata
+    this.readFieldLabels = readFieldLabels
     this.capacity = new SearchCapacity(settings.maxConcurrentSearches)
     this.manticore = manticore ?? new ManticoreClient({
       baseUrl: settings.manticoreUrl,
@@ -66,27 +69,57 @@ export class SearchService {
       let total = 0
       let tookMs = 0
       let firstPage = true
+      let readSourceMetadata = this.readSourceMetadata
       const release = this.capacity.acquire()
       try {
         for await (const response of this.manticore.searchAll(expression, pageSize, { signal })) {
+          if (signal?.aborted) return
           if (firstPage) {
             total = response.total
             firstPage = false
           }
           tookMs += response.tookMs
-          for (const hit of response.hits) {
-            if (signal?.aborted) return
-            const source = hit._source ?? {}
+          const sourceIds = new Set()
+          const hits = response.hits.map(hit => {
             const { databaseId, rowId } = decodeDocumentId(hit._id)
             const database = catalog.byId.get(databaseId)
             if (!database) throw new Error(`Database ${databaseId} is missing from the catalog`)
-            const sourceName = database.search.name_table
+            if (readSourceMetadata && !sentSources.has(database.search.name_table)) sourceIds.add(databaseId)
+            return { hit, databaseId, rowId, published: database.search }
+          })
+          let liveSources
+          if (sourceIds.size) {
+            try {
+              const rows = await readSourceMetadata([...sourceIds])
+              liveSources = new Map(rows.map(row => [String(row.id), row]))
+            } catch (error) {
+              if (error?.code !== APPLICATION_ERROR_CODES.UNAVAILABLE) throw error
+              readSourceMetadata = undefined
+            }
+          }
+          for (const { hit, databaseId, rowId, published } of hits) {
+            if (signal?.aborted) return
+            const sourceName = published.name_table
             if (!sentSources.has(sourceName)) {
               sentSources.add(sourceName)
-              yield { object_data_base: database.search }
+              const current = liveSources?.get(String(databaseId))
+              const metadata = current && current.name_table === sourceName
+                ? { ...published, name: String(current.name ?? ''), info: String(current.info ?? '') }
+                : published
+              const source = { object_data_base: metadata }
+              if (sentSources.size === 1 && this.readFieldLabels) {
+                try {
+                  const rows = await this.readFieldLabels()
+                  if (rows.length) source.field_labels = Object.fromEntries(rows.map(({ field_key, label }) => [field_key, label]))
+                } catch (error) {
+                  if (error?.code !== APPLICATION_ERROR_CODES.UNAVAILABLE) throw error
+                }
+                if (signal?.aborted) return
+              }
+              yield source
               if (signal?.aborted) return
             }
-            const fields = parseStoredFields(source.payload)
+            const fields = parseStoredFields(hit._source?.payload)
             if (!Object.hasOwn(fields, 'id')) fields.id = rowId
             yield { object_data: { source_name: sourceName, fields } }
             if (signal?.aborted) return

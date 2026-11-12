@@ -83,6 +83,7 @@ message SearchResult {
     ObjectAddSearch object_add_search = 4;
     SearchMeta meta = 5;
   }
+  map<string,string> field_labels = 6;
 }
 
 service BaseSearches {

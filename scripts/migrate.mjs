@@ -24,8 +24,8 @@ export async function runMigrations(pool, { directory = fileURLToPath(new URL('.
         if (applied.get(version) !== checksum) throw new Error(`Migration checksum mismatch: ${version}`)
         continue
       }
-      // These versioned files contain simple DDL statements only. MySQL DDL
-      // commits implicitly; IF NOT EXISTS makes an interrupted run resumable.
+      // MySQL DDL commits implicitly. Schema statements and seed inserts must
+      // be safe to rerun if a migration is interrupted.
       for (const statement of source.split(';').map(value => value.trim()).filter(Boolean)) await connection.query(statement)
       await connection.execute('INSERT INTO `schema_migrations` (`version`, `checksum`) VALUES (?, ?)', [version, checksum])
       completed.push(version)

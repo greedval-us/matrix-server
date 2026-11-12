@@ -3,9 +3,11 @@ import { ApplicationError } from '../../core/errors.mjs'
 export const CONTROL_COLUMNS = Object.freeze([
   { key: 'date', label: 'Дата', type: 'date', sortable: true },
   { key: 'id', label: 'ID', type: 'text', sortable: true },
+  { key: 'source_id', label: 'Telegram ID', type: 'text', sortable: true },
   { key: 'number', label: 'Номер', type: 'text', sortable: true },
   { key: 'fio', label: 'ФИО', type: 'text', sortable: true },
-  { key: 'date_of_birth', label: 'Дата рождения', type: 'date', sortable: true },
+  { key: 'date_of_birth', label: 'Дата рождения', type: 'text', sortable: true },
+  { key: 'group_chat_locality', label: 'Группа, чат, н.п.', type: 'text', sortable: true },
   { key: 'initiator', label: 'Инициатор', type: 'text', sortable: true },
   { key: 'executor', label: 'Исполнитель', type: 'text', sortable: true },
   { key: 'note', label: 'Примечание', type: 'text', sortable: true },
@@ -17,8 +19,7 @@ export const CONTROL_FIELDS = Object.freeze(CONTROL_COLUMNS.map(column => column
 export const MAX_ROW_FILES = 1000
 const UINT64_MAX = 18446744073709551615n
 const writable = new Set(CONTROL_FIELDS.filter(key => key !== 'id'))
-const dates = new Set(['date', 'date_of_birth'])
-const text = new Set(['note', 'realization', 'intersections'])
+const text = new Set(['date_of_birth', 'note', 'realization', 'intersections'])
 export const invalid = () => new ApplicationError(3, 'Invalid control record request')
 
 export function validateId(id) {
@@ -42,7 +43,7 @@ export function validateValues(values, { create = false } = {}) {
   if (!create && entries.length === 0) throw invalid()
   return entries.map(([key, value]) => {
     if (!writable.has(key) || typeof value !== 'string') throw invalid()
-    if (dates.has(key)) return [key, value === '' ? null : calendarDate(value)]
+    if (key === 'date') return [key, value === '' ? null : calendarDate(value)]
     if (text.has(key) ? Buffer.byteLength(value, 'utf8') > 65_535 : [...value].length > (key === 'number' ? 64 : 255)) throw invalid()
     return [key, value]
   })

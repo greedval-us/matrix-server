@@ -119,6 +119,16 @@ export class OperationalRepository {
     return this.execute(`SELECT ${CATALOG_FIELDS.map(quoted).join(', ')} FROM \`data_base\` ORDER BY \`id\``)
   }
 
+  async searchFieldLabels() {
+    return this.execute('SELECT `field_key`, `label` FROM `search_field_labels`')
+  }
+
+  async searchSourceMetadata(databaseIds) {
+    const ids = [...new Set(databaseIds.map(id => idValue(String(id), 'data_base')))]
+    if (!ids.length) return []
+    return this.execute(`SELECT \`id\`, \`name_table\`, \`name\`, \`info\` FROM \`data_base\` WHERE \`id\` IN (${ids.map(() => '?').join(', ')})`, ids)
+  }
+
   async appendLog({ module, method, statusCode, durationMs, accessKeyId }) {
     if (![module, method].every(value => typeof value === 'string' && /^[A-Za-z0-9_.\/]{1,128}$/.test(value))
       || !Number.isInteger(statusCode) || statusCode < 0 || statusCode > 16

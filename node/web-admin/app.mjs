@@ -16,6 +16,7 @@ const headers = {
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
 }
 const maxBody = 4096
+const maxCatalogBody = 400 * 1024
 const maxKeyId = 18_446_744_073_709_551_615n
 const allowedPeriods = new Set(['1', '7', '30'])
 const logResults = new Set(['success', 'error', 'cancelled'])
@@ -49,16 +50,16 @@ function validOrigin(request) {
   catch { return false }
 }
 
-async function readJson(request, property) {
+async function readJson(request, property, limit = maxBody) {
   const mime = (request.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase()
   if (mime !== 'application/json') throw new HttpError(415, 'Отправьте запрос в формате JSON.')
   const tooLarge = () => new HttpError(413, 'Запрос слишком большой.')
-  if (Number(request.headers['content-length']) > maxBody) throw tooLarge()
+  if (Number(request.headers['content-length']) > limit) throw tooLarge()
   let size = 0
   const chunks = []
   for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     size += chunk.length
-    if (size > maxBody) throw tooLarge()
+    if (size > limit) throw tooLarge()
     chunks.push(chunk)
   }
   let value
@@ -70,10 +71,16 @@ async function readJson(request, property) {
   return value
 }
 
+function normalizeLabel(value) {
+  const label = typeof value === 'string' ? value.trim() : ''
+  if (!label || label.length > 255 || /[\u0000-\u001f\u007f]/.test(label)) return null
+  return label
+}
+
 async function readLabel(request) {
   const input = await readJson(request, 'label')
-  const label = typeof input.label === 'string' ? input.label.trim() : ''
-  if (!label || label.length > 255 || /[\u0000-\u001f\u007f]/.test(label)) throw invalidBody()
+  const label = normalizeLabel(input.label)
+  if (label === null) throw invalidBody()
   return label
 }
 
@@ -105,11 +112,12 @@ function logMetadata({ id, access_key_id, label, module, method, status_code, du
 function publicError(error) {
   if (error instanceof HttpError) return error
   if (error?.code === 3) return invalidBody()
+  if (error?.code === 5) return new HttpError(404, 'Запись каталога не найдена.')
   if (error?.code === 14) return new HttpError(503, 'База данных временно недоступна.')
   return new HttpError(500, 'Не удалось выполнить запрос.')
 }
 
-export function createWebAdminHandler({ repository, passwordHash, now = Date.now }) {
+export function createWebAdminHandler({ repository, catalogEditor, passwordHash, now = Date.now }) {
   if (!isPasswordHash(passwordHash)) throw new Error('Invalid web admin password hash')
   const sessions = createSessions(now)
   const reserveLogin = createLoginLimiter(now)
@@ -138,11 +146,12 @@ export function createWebAdminHandler({ repository, passwordHash, now = Date.now
   }
 
   async function analytics(response, query) {
-    const { days = '7' } = readFilters(query, ['days'])
+    const { days = '7', owner } = readFilters(query, ['days', 'owner'])
     if (!allowedPeriods.has(days)) throw invalidFilter()
+    if (owner !== undefined && normalizeLabel(owner) !== owner) throw invalidFilter()
     const dayCount = Number(days)
     const time = now()
-    const { keys, totals, daily, topKeys } = await repository.analytics(periodStart(time, dayCount))
+    const { keys, totals, daily, topKeys } = await repository.analytics(periodStart(time, dayCount), owner)
     const { total, bound, pending, revoked } = keys
     const { requests, errors, activeKeys, averageMs } = totals
     const byDay = new Map(daily.map(row => [row.day, row]))
@@ -169,6 +178,40 @@ export function createWebAdminHandler({ repository, passwordHash, now = Date.now
     return json(response, 200, { logs: page.logs.map(logMetadata), nextCursor: page.nextCursor })
   }
 
+  async function catalog(request, response, path, query) {
+    const { method } = request
+    if (path === '/api/catalog/types') {
+      readFilters(query, [])
+      if (method === 'GET') return json(response, 200, { types: await catalogEditor.listTypes() })
+      if (method === 'POST') {
+        const { name } = await readJson(request, 'name')
+        try {
+          return json(response, 201, { type: await catalogEditor.createType(name) })
+        } catch (error) {
+          if (error?.code === 6) throw new HttpError(409, 'Такое название уже есть в справочнике. Выберите существующий тип.')
+          throw error
+        }
+      }
+      throw new HttpError(405, 'Метод запроса недоступен.')
+    }
+    if (path === '/api/catalog' && method === 'GET') {
+      const { q = '', page = '1' } = readFilters(query, ['q', 'page'])
+      if (!/^[1-9][0-9]{0,8}$/.test(page)) throw invalidFilter()
+      return json(response, 200, await catalogEditor.list({ query: q, page: Number(page) }))
+    }
+    const match = /^\/api\/catalog\/([1-9][0-9]{0,9})$/.exec(path)
+    if (match) {
+      const [, id] = match
+      if (Number(id) > 4_294_967_295) throw invalidBody()
+      if (method === 'GET') return json(response, 200, { row: await catalogEditor.get(id) })
+      if (method === 'POST') {
+        const { changes } = await readJson(request, 'changes', maxCatalogBody)
+        return json(response, 200, { row: await catalogEditor.update(id, changes) })
+      }
+    } else if (path !== '/api/catalog') throw new HttpError(404, 'Страница не найдена.')
+    throw new HttpError(405, 'Метод запроса недоступен.')
+  }
+
   return async function handle(request, response) {
     for (const [name, value] of Object.entries(headers)) response.setHeader(name, value)
     try {
@@ -187,10 +230,12 @@ export function createWebAdminHandler({ repository, passwordHash, now = Date.now
         throw new HttpError(403, 'Источник запроса не подтверждён.')
       }
       if (path === '/api/session') return await session(request, response)
-      if (path !== '/api/keys' && !path.startsWith('/api/keys/') && path !== '/api/logs' && path !== '/api/analytics') {
+      const catalogPath = path === '/api/catalog' || path.startsWith('/api/catalog/')
+      if (!catalogPath && path !== '/api/keys' && !path.startsWith('/api/keys/') && path !== '/api/logs' && path !== '/api/analytics') {
         throw new HttpError(404, 'Страница не найдена.')
       }
       if (!sessions.authenticated(request.headers.cookie)) throw new HttpError(401, 'Войдите в веб-админку.')
+      if (catalogPath) return await catalog(request, response, path, query)
       if (path === '/api/analytics' || path === '/api/logs') {
         if (method !== 'GET') throw new HttpError(405, 'Метод запроса недоступен.')
         return path === '/api/analytics' ? await analytics(response, query) : await logPage(response, query)

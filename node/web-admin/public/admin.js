@@ -4,12 +4,36 @@ const byId = (id) => document.getElementById(id);
 const checking = byId('checking');
 const login = byId('login');
 const dashboard = byId('dashboard');
+const pageTitle = byId('page-title');
+const showAccess = byId('show-access');
+const showCatalog = byId('show-catalog');
+const catalogView = byId('catalog-view');
+const catalogSearch = byId('catalog-search');
+const catalogNotice = byId('catalog-notice');
+const catalogMessage = byId('catalog-message');
+const catalogTable = byId('catalog-table');
+const catalogRows = byId('catalog-rows');
+const catalogPagination = byId('catalog-pagination');
+const catalogPrev = byId('catalog-prev');
+const catalogNext = byId('catalog-next');
+const catalogEditDialog = byId('catalog-edit-dialog');
+const catalogEditForm = byId('catalog-edit-form');
+const catalogEditFields = byId('catalog-edit-fields');
+const catalogEditMessage = byId('catalog-edit-message');
+const catalogEditCancel = byId('catalog-edit-cancel');
+const catalogEditSave = byId('catalog-edit-save');
+const catalogTypeSelect = byId('catalog-field-type');
+const catalogTypesDialog = byId('catalog-types-dialog');
+const catalogTypeForm = byId('catalog-type-form');
+const catalogTypeName = byId('catalog-type-name');
+const catalogTypesMessage = byId('catalog-types-message');
 const logout = byId('logout');
 const password = byId('password');
 const refresh = byId('refresh');
 const keyList = byId('key-list');
 const keyMessage = byId('key-message');
 const keySearch = byId('key-search');
+const keyStatusFilter = byId('key-status');
 const journalTitle = byId('journal-title');
 const showAllLogs = byId('show-all-logs');
 const logFilters = byId('log-filters');
@@ -32,12 +56,14 @@ const revokeDialog = byId('revoke-dialog');
 const revokeForm = byId('revoke-form');
 const revokeButton = byId('open-revoke');
 const analyticsDays = byId('analytics-days');
+const analyticsOwner = byId('analytics-owner');
 const analyticsContent = byId('analytics-content');
 const analyticsMessage = byId('analytics-message');
 
 const dateFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'medium' });
 const dayFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 const numberFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
+const catalogFields = ['name', 'info', 'relevance_date', 'country', 'type', 'trust'];
 const operations = new Map(Object.entries({
   GetIndexStatus: 'Проверка поискового индекса',
   StreamDatabaseAll: 'Загрузка каталога баз',
@@ -63,6 +89,12 @@ let session = new AbortController();
 let keyRequest;
 let logRequest;
 let analyticsRequest;
+let catalogListRequest;
+let catalogEditRequest;
+let catalogQuery = '';
+let catalogPage = 1;
+let catalogLastPage = 1;
+let catalogDraft;
 let keys = [];
 let selectedId = '';
 let revokeId = '';
@@ -134,6 +166,22 @@ function keyStatus(key) {
   return ['pending', 'Ожидает привязки'];
 }
 
+function renderOwnerOptions() {
+  const selected = analyticsOwner.value;
+  const owners = [...new Set(keys.map(({ label }) => label))].sort((a, b) => a.localeCompare(b, 'ru-RU'));
+  const all = element('option', 'Все владельцы');
+  all.value = '';
+  const options = owners.map((owner) => {
+    const option = element('option', owner);
+    option.value = owner;
+    return option;
+  });
+  analyticsOwner.replaceChildren(all, ...options);
+  analyticsOwner.value = owners.includes(selected) ? selected : '';
+  analyticsOwner.disabled = !owners.length;
+  return analyticsOwner.value !== selected;
+}
+
 function selectKey(id, focusJournal = false) {
   if (selectedId !== id) {
     selectedId = id;
@@ -149,6 +197,7 @@ function showLogin(text = '') {
   keyRequest?.abort();
   logRequest?.abort();
   analyticsRequest?.abort();
+  resetCatalog();
   keys = [];
   selectedId = '';
   keyList.replaceChildren();
@@ -157,7 +206,9 @@ function showLogin(text = '') {
   byId('top-keys').replaceChildren();
   logFilters.reset();
   analyticsDays.value = '7';
+  renderOwnerOptions();
   keySearch.value = '';
+  keyStatusFilter.value = 'active';
   issuedKey.value = '';
   byId('issued-label').textContent = '';
   renameLabel.value = '';
@@ -188,7 +239,8 @@ function showDashboard() {
   byId('key-count').hidden = true;
   byId('key-breakdown').hidden = true;
   renderDetails();
-  byId('page-title').focus();
+  showDashboardSection('access');
+  pageTitle.focus();
   refreshDashboard();
 }
 
@@ -196,9 +248,16 @@ function renderKeys() {
   const focusedId = document.activeElement?.dataset.keyId;
   const fragment = document.createDocumentFragment();
   const query = keySearch.value.trim().replace(/^№\s*/, '').toLocaleLowerCase('ru-RU');
-  const visibleKeys = keys.filter((key) => !query || key.id.includes(query) || key.label.toLocaleLowerCase('ru-RU').includes(query));
+  const filter = keyStatusFilter.value === 'unused' ? 'pending' : keyStatusFilter.value;
+  const counts = { active: 0, pending: 0, revoked: 0 };
+  let visible = 0;
   let focusedRow;
-  for (const key of visibleKeys) {
+  for (const key of keys) {
+    const [kind, status] = keyStatus(key);
+    counts[kind]++;
+    if (filter !== 'all' && kind !== filter) continue;
+    if (query && !key.id.includes(query) && !key.label.toLocaleLowerCase('ru-RU').includes(query)) continue;
+    visible++;
     const row = element('button', undefined, 'key-row');
     row.type = 'button';
     row.dataset.keyId = key.id;
@@ -206,7 +265,6 @@ function renderKeys() {
     row.addEventListener('click', () => selectKey(key.id, matchMedia('(max-width: 850px)').matches));
     const description = element('span');
     description.append(element('span', key.label, 'key-name'), element('span', '№' + key.id, 'key-id'));
-    const [kind, status] = keyStatus(key);
     row.append(description, element('span', status, 'pill ' + kind));
     const item = element('li');
     item.append(row);
@@ -216,10 +274,16 @@ function renderKeys() {
   keyList.replaceChildren(fragment);
   focusedRow?.focus({ preventScroll: true });
   const count = byId('key-count');
-  count.textContent = query ? visibleKeys.length + ' / ' + keys.length : keys.length;
+  count.textContent = visible === keys.length ? visible : visible + ' / ' + keys.length;
   count.hidden = false;
+  byId('key-bound').textContent = numberFormat.format(counts.active);
+  byId('key-pending').textContent = numberFormat.format(counts.pending);
+  byId('key-revoked').textContent = numberFormat.format(counts.revoked);
+  byId('key-breakdown').hidden = !keys.length;
   if (!keys.length) message(keyMessage, 'Выпустите первый ключ, чтобы открыть доступ к Matrix.');
-  else message(keyMessage, visibleKeys.length ? '' : 'Ключи не найдены.');
+  else if (visible) message(keyMessage);
+  else if (query) message(keyMessage, 'Ключи не найдены. Измените запрос или статус.');
+  else message(keyMessage, 'Ключей с выбранным статусом нет. Выберите другой статус.');
 }
 
 function renderDetails() {
@@ -310,7 +374,7 @@ async function loadLogs({ append = false } = {}) {
   }
 }
 
-async function refreshKeys(preferredId) {
+async function refreshKeys(preferredId, revealKey) {
   keyRequest?.abort();
   const controller = new AbortController();
   keyRequest = controller;
@@ -319,8 +383,13 @@ async function refreshKeys(preferredId) {
     const payload = await authenticatedRequest('/api/keys', { signal: controller.signal });
     if (controller.signal.aborted || session.signal.aborted) return;
     keys = payload.keys.map((key) => ({ ...key, id: String(key.id) }));
-    const current = preferredId || selectedId;
-    selectedId = keys.some((key) => key.id === current) ? current : '';
+    const selected = keys.find((key) => key.id === (preferredId || selectedId));
+    selectedId = selected?.id ?? '';
+    if (revealKey && selected && keyStatusFilter.value !== 'all') {
+      const [kind] = keyStatus(selected);
+      keyStatusFilter.value = kind === 'pending' ? 'unused' : kind;
+    }
+    if (renderOwnerOptions()) void refreshAnalytics();
     renderKeys();
     renderDetails();
   } catch (error) {
@@ -333,15 +402,11 @@ async function refreshKeys(preferredId) {
   }
 }
 
-function renderAnalytics({ keys: counts, totals, daily, topKeys }) {
+function renderAnalytics({ totals, daily, topKeys }) {
   byId('metric-requests').textContent = numberFormat.format(totals.requests);
   byId('metric-errors').textContent = numberFormat.format(totals.errors);
   byId('metric-active').textContent = numberFormat.format(totals.activeKeys);
   byId('metric-duration').textContent = totals.requests ? numberFormat.format(totals.averageMs) + ' мс' : '—';
-  byId('key-bound').textContent = numberFormat.format(counts.bound);
-  byId('key-pending').textContent = numberFormat.format(counts.pending);
-  byId('key-revoked').textContent = numberFormat.format(counts.revoked);
-  byId('key-breakdown').hidden = false;
 
   const maximum = Math.max(1, ...daily.map(({ requests }) => requests));
   const days = document.createDocumentFragment();
@@ -392,8 +457,10 @@ async function refreshAnalytics() {
   analyticsRequest = controller;
   analyticsContent.hidden = true;
   message(analyticsMessage, 'Загружаем аналитику…');
+  const params = new URLSearchParams({ days: analyticsDays.value });
+  if (analyticsOwner.value) params.set('owner', analyticsOwner.value);
   try {
-    const stats = await authenticatedRequest('/api/analytics?days=' + analyticsDays.value, { signal: controller.signal });
+    const stats = await authenticatedRequest('/api/analytics?' + params, { signal: controller.signal });
     if (controller.signal.aborted) return;
     renderAnalytics(stats);
     analyticsContent.hidden = false;
@@ -405,8 +472,283 @@ async function refreshAnalytics() {
 
 function setPending(form, pending) {
   form.dataset.pending = String(pending);
-  for (const control of form.querySelectorAll('button, input')) control.disabled = pending;
+  for (const control of form.querySelectorAll('button, input, select, textarea')) control.disabled = pending;
 }
+
+function showDashboardSection(section) {
+  const catalog = section === 'catalog';
+  for (const region of dashboard.querySelectorAll('[data-dashboard-view]')) {
+    region.hidden = region.dataset.dashboardView !== section;
+  }
+  showAccess.setAttribute('aria-pressed', String(!catalog));
+  showCatalog.setAttribute('aria-pressed', String(catalog));
+  pageTitle.textContent = catalog ? 'Каталог баз' : 'Управление доступом';
+  if (!catalog) catalogListRequest?.abort();
+}
+
+function resetCatalogEditor() {
+  catalogEditRequest?.abort();
+  catalogDraft = undefined;
+  catalogEditForm.reset();
+  setPending(catalogEditForm, false);
+  catalogEditFields.hidden = true;
+  catalogEditSave.hidden = true;
+  byId('catalog-edit-id').textContent = '';
+  byId('catalog-edit-table').textContent = '';
+  message(catalogEditMessage);
+}
+
+function resetCatalogTypeForm() {
+  catalogTypeForm.reset();
+  setPending(catalogTypeForm, false);
+  message(catalogTypesMessage);
+}
+
+function resetCatalog() {
+  catalogListRequest?.abort();
+  catalogQuery = '';
+  catalogPage = 1;
+  catalogLastPage = 1;
+  catalogSearch.value = '';
+  catalogRows.replaceChildren();
+  catalogTable.hidden = true;
+  catalogPagination.hidden = true;
+  byId('catalog-count').textContent = '';
+  message(catalogNotice);
+  message(catalogMessage);
+  if (catalogEditDialog.open) catalogEditDialog.close();
+  resetCatalogEditor();
+  if (catalogTypesDialog.open) catalogTypesDialog.close();
+  resetCatalogTypeForm();
+}
+
+function catalogTableRow(row) {
+  const tr = element('tr');
+  const title = element('td');
+  title.append(element('strong', row.name || '—'), element('span', row.name_table, 'catalog-table-name'));
+  const edit = element('button', 'Изменить', 'button');
+  edit.type = 'button';
+  edit.dataset.catalogId = row.id;
+  edit.setAttribute('aria-label', 'Изменить базу «' + (row.name || row.name_table) + '»');
+  edit.addEventListener('click', () => void openCatalogEditor(String(row.id)));
+  const action = element('td');
+  action.append(edit);
+  tr.append(element('td', row.id, 'catalog-id'), title,
+    element('td', row.country || '—', 'catalog-extra'), element('td', row.type || '—', 'catalog-extra'), action);
+  return tr;
+}
+
+async function loadCatalog(page = catalogPage) {
+  catalogListRequest?.abort();
+  const controller = new AbortController();
+  catalogListRequest = controller;
+  const focused = document.activeElement;
+  const focusedId = focused?.dataset.catalogId;
+  const wasPaging = focused === catalogPrev || focused === catalogNext;
+  catalogTable.hidden = true;
+  catalogPagination.hidden = true;
+  catalogRows.replaceChildren();
+  message(catalogMessage, 'Загружаем каталог…');
+  const params = new URLSearchParams({ page: String(page) });
+  if (catalogQuery) params.set('q', catalogQuery);
+  try {
+    const result = await authenticatedRequest('/api/catalog?' + params, { signal: controller.signal });
+    if (controller.signal.aborted || session.signal.aborted) return;
+    const { rows, total, page: current, pageSize } = result;
+    catalogLastPage = Math.max(1, Math.ceil(total / pageSize));
+    if (current > catalogLastPage) {
+      void loadCatalog(catalogLastPage);
+      return;
+    }
+    catalogPage = current;
+    if (!rows.length) {
+      message(catalogMessage, catalogQuery ? 'По этому запросу базы не найдены.' : 'В каталоге пока нет баз.');
+      return;
+    }
+    const offset = (catalogPage - 1) * pageSize;
+    catalogRows.replaceChildren(...rows.map(catalogTableRow));
+    byId('catalog-count').textContent = `${numberFormat.format(offset + 1)}–${numberFormat.format(offset + rows.length)} из ${numberFormat.format(total)}`;
+    catalogPrev.disabled = catalogPage === 1;
+    catalogNext.disabled = catalogPage >= catalogLastPage;
+    catalogTable.scrollTop = 0;
+    catalogTable.hidden = false;
+    catalogPagination.hidden = false;
+    message(catalogMessage);
+    if (document.activeElement === document.body) {
+      if (focusedId) {
+        const rowButton = [...catalogRows.querySelectorAll('button')].find((button) => button.dataset.catalogId === focusedId);
+        (rowButton || catalogSearch).focus({ preventScroll: true });
+      } else if (wasPaging) {
+        catalogTable.focus({ preventScroll: true });
+      }
+    }
+  } catch (error) {
+    if (!controller.signal.aborted && !session.signal.aborted) message(catalogMessage, error.message, true);
+  }
+}
+
+function renderCatalogTypeOptions(types, current) {
+  const emptyOption = element('option', 'Не указан');
+  emptyOption.value = '';
+  const options = types.map((type) => {
+    const option = element('option', type);
+    option.value = type;
+    return option;
+  });
+  if (current && !types.includes(current)) {
+    const currentOption = element('option', current + ' (нет в списке)');
+    currentOption.value = current;
+    currentOption.disabled = true;
+    options.unshift(currentOption);
+  }
+  catalogTypeSelect.replaceChildren(emptyOption, ...options);
+}
+
+async function openCatalogEditor(id) {
+  resetCatalogEditor();
+  const controller = new AbortController();
+  catalogEditRequest = controller;
+  message(catalogEditMessage, 'Загружаем метаданные…');
+  catalogEditDialog.showModal();
+  catalogEditCancel.focus();
+  try {
+    const options = { signal: controller.signal };
+    const [{ row }, { types }] = await Promise.all([
+      authenticatedRequest('/api/catalog/' + encodeURIComponent(id), options),
+      authenticatedRequest('/api/catalog/types', options),
+    ]);
+    if (controller.signal.aborted || !catalogEditDialog.open) return;
+    byId('catalog-edit-id').textContent = row.id;
+    byId('catalog-edit-table').textContent = row.name_table;
+    renderCatalogTypeOptions(types, row.type);
+    const values = {};
+    for (const field of catalogFields) {
+      const input = catalogEditForm.elements.namedItem(field);
+      input.value = row[field] ?? '';
+      values[field] = input.value;
+    }
+    catalogDraft = { id, values };
+    catalogEditFields.hidden = false;
+    catalogEditSave.hidden = false;
+    message(catalogEditMessage);
+    byId('catalog-field-name').focus();
+  } catch (error) {
+    if (!controller.signal.aborted && catalogEditDialog.open) message(catalogEditMessage, error.message, true);
+  }
+}
+
+showAccess.addEventListener('click', () => {
+  if (catalogView.hidden) return;
+  showDashboardSection('access');
+  pageTitle.focus();
+});
+showCatalog.addEventListener('click', () => {
+  if (!catalogView.hidden) return;
+  showDashboardSection('catalog');
+  pageTitle.focus();
+  void loadCatalog();
+});
+byId('catalog-search-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const query = catalogSearch.value.trim();
+  if ([...query].length > 255) {
+    message(catalogMessage, 'Сократите запрос до 255 символов.', true);
+    return;
+  }
+  message(catalogNotice);
+  catalogQuery = query;
+  void loadCatalog(1);
+});
+catalogPrev.addEventListener('click', () => {
+  if (catalogPage > 1) void loadCatalog(catalogPage - 1);
+});
+catalogNext.addEventListener('click', () => {
+  if (catalogPage < catalogLastPage) void loadCatalog(catalogPage + 1);
+});
+
+byId('catalog-types-open').addEventListener('click', () => {
+  resetCatalogTypeForm();
+  message(catalogNotice);
+  catalogTypesDialog.showModal();
+  catalogTypeName.focus();
+});
+byId('catalog-types-cancel').addEventListener('click', () => catalogTypesDialog.close());
+catalogTypesDialog.addEventListener('cancel', (event) => {
+  if (catalogTypeForm.dataset.pending === 'true') event.preventDefault();
+});
+catalogTypesDialog.addEventListener('close', () => {
+  if (!catalogTypesDialog.open) resetCatalogTypeForm();
+});
+catalogTypeForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (catalogTypeForm.dataset.pending === 'true') return;
+  const name = catalogTypeName.value.trim();
+  if (!name) {
+    message(catalogTypesMessage, 'Введите название типа.', true);
+    catalogTypeName.focus();
+    return;
+  }
+  const { signal } = session;
+  message(catalogTypesMessage);
+  setPending(catalogTypeForm, true);
+  try {
+    const { type } = await authenticatedRequest('/api/catalog/types', { method: 'POST', data: { name } });
+    if (signal.aborted) return;
+    catalogTypesDialog.close();
+    message(catalogNotice, 'Тип «' + type + '» добавлен.');
+  } catch (error) {
+    if (!signal.aborted) message(catalogTypesMessage, error.message, true);
+  } finally {
+    if (!signal.aborted) {
+      setPending(catalogTypeForm, false);
+      if (catalogTypesDialog.open) catalogTypeName.focus();
+    }
+  }
+});
+
+catalogEditCancel.addEventListener('click', () => catalogEditDialog.close());
+catalogEditDialog.addEventListener('cancel', (event) => {
+  if (catalogEditForm.dataset.pending === 'true') event.preventDefault();
+});
+catalogEditDialog.addEventListener('close', () => {
+  if (!catalogEditDialog.open) resetCatalogEditor();
+});
+catalogEditForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!catalogDraft || catalogEditForm.dataset.pending === 'true') return;
+  const changes = {};
+  for (const field of catalogFields) {
+    const input = catalogEditForm.elements.namedItem(field);
+    const value = input.value;
+    if (value === catalogDraft.values[field]) continue;
+    const tooLong = field === 'info' ? new TextEncoder().encode(value).length > 65_535 : [...value].length > 255;
+    if (tooLong) {
+      message(catalogEditMessage, field === 'info' ? 'Описание должно занимать не более 65 535 байт.' : 'Сократите значение поля до 255 символов.', true);
+      input.focus();
+      return;
+    }
+    changes[field] = value === '' ? null : value;
+  }
+  if (!Object.keys(changes).length) {
+    message(catalogEditMessage, 'Изменений нет.');
+    return;
+  }
+  const { id } = catalogDraft;
+  const { signal } = session;
+  message(catalogEditMessage);
+  setPending(catalogEditForm, true);
+  try {
+    await authenticatedRequest('/api/catalog/' + encodeURIComponent(id), { method: 'POST', data: { changes } });
+    if (signal.aborted) return;
+    catalogEditDialog.close();
+    message(catalogNotice, 'Изменения базы №' + id + ' сохранены.');
+    void loadCatalog();
+  } catch (error) {
+    if (!signal.aborted) message(catalogEditMessage, error.message, true);
+  } finally {
+    if (!signal.aborted) setPending(catalogEditForm, false);
+  }
+});
 
 loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -431,18 +773,20 @@ logout.addEventListener('click', async () => {
     await authenticatedRequest('/api/session', { method: 'DELETE' });
     showLogin();
   } catch (error) {
-    if (!session.signal.aborted) message(notice, error.message, true);
+    if (!session.signal.aborted) message(catalogView.hidden ? notice : catalogNotice, error.message, true);
   } finally { logout.disabled = false; }
 });
 
-function refreshDashboard(preferredId) {
-  void refreshKeys(preferredId);
+function refreshDashboard(preferredId, { revealKey = false } = {}) {
+  void refreshKeys(preferredId, revealKey);
   void refreshAnalytics();
 }
 
 refresh.addEventListener('click', () => { message(notice); refreshDashboard(); });
 keySearch.addEventListener('input', () => { if (!keyRequest || !refresh.disabled || keys.length) renderKeys(); });
+keyStatusFilter.addEventListener('change', () => { if (!keyRequest || !refresh.disabled || keys.length) renderKeys(); });
 analyticsDays.addEventListener('change', () => void refreshAnalytics());
+analyticsOwner.addEventListener('change', () => void refreshAnalytics());
 showAllLogs.addEventListener('click', () => selectKey('', true));
 for (const [method, label] of operations) {
   const option = element('option', label);
@@ -492,7 +836,7 @@ issueForm.addEventListener('submit', async (event) => {
     issuedView.hidden = false;
     byId('copy-key').focus();
     keySearch.value = '';
-    refreshDashboard(String(issued.id));
+    refreshDashboard(String(issued.id), { revealKey: true });
   } catch (error) {
     if (!signal.aborted) message(byId('issue-error'), error.message, true);
   } finally { setPending(issueForm, false); }
@@ -540,6 +884,7 @@ renameForm.addEventListener('submit', async (event) => {
     if (key) key.label = updated.label;
     renameDialog.close();
     keySearch.value = '';
+    renderOwnerOptions();
     renderKeys();
     renderDetails();
     message(notice, 'Имя ключа №' + id + ' изменено.');

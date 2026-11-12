@@ -15,7 +15,7 @@ const key = {
   revoked_at: null,
 }
 
-async function fixture(t, { repository = {}, now } = {}) {
+async function fixture(t, { repository = {}, catalogEditor, now } = {}) {
   const calls = []
   const dependencies = {
     async list() { return [{ ...key, apiKey: 'do not expose', key_digest: 'do not expose' }] },
@@ -27,8 +27,8 @@ async function fixture(t, { repository = {}, now } = {}) {
       return { logs: [{ id: '9', access_key_id: keyId, label: key.label, module: 'search', method: 'GetIndexStatus', status_code: 0,
         duration_ms: 5, created_at: '2026-11-11 10:32:00.000', signature: 'do not expose' }], nextCursor: '9' }
     },
-    async analytics(from) {
-      calls.push(['analytics', from])
+    async analytics(from, owner) {
+      calls.push(['analytics', from, owner])
       return { keys: { total: 1, bound: 1, pending: 0, revoked: 0, key_digest: 'do not expose' },
         totals: { requests: 3, errors: 1, activeKeys: 1, averageMs: 5, raw_data: 'do not expose' },
         daily: [{ day: '2026-11-11', requests: 3, errors: 1 }],
@@ -36,7 +36,7 @@ async function fixture(t, { repository = {}, now } = {}) {
     },
     ...repository,
   }
-  const server = http.createServer(createWebAdminHandler({ repository: dependencies, passwordHash, now }))
+  const server = http.createServer(createWebAdminHandler({ repository: dependencies, catalogEditor, passwordHash, now }))
   await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
@@ -134,9 +134,26 @@ test('analytics and the global journal require a session and use bounded, valida
   const response = await request('/api/logs?days=1&method=GetIndexStatus&result=error&before=' + keyId)
   assert.equal(response.status, 200)
   assert.equal((await response.json()).nextCursor, '9')
-  assert.deepEqual(calls, [['analytics', '2026-11-05 00:00:00'], ['logPage', {
+  assert.deepEqual(calls, [['analytics', '2026-11-05 00:00:00', undefined], ['logPage', {
     id: undefined, from: '2026-11-11 00:00:00', method: 'GetIndexStatus', result: 'error', before: keyId,
   }]])
+})
+
+test('analytics accepts an exact owner label only for authenticated and valid requests', async t => {
+  const { request, login, calls } = await fixture(t, { now: () => Date.parse('2026-11-11T10:00:00Z') })
+  const owner = 'Иванов & Ко + отдел'
+  const url = '/api/analytics?' + new URLSearchParams({ days: '1', owner })
+  assert.equal((await request(url)).status, 401)
+  await login()
+  for (const invalid of ['', ' Иванов', 'Иванов ', 'Иванов\u0000', 'а'.repeat(256)]) {
+    assert.equal((await request('/api/analytics?' + new URLSearchParams({ owner: invalid }))).status, 400)
+  }
+  assert.equal((await request(url + '&owner=Другой')).status, 400)
+  assert.deepEqual(calls, [])
+  const response = await request(url)
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).daily.length, 1)
+  assert.deepEqual(calls, [['analytics', '2026-11-11 00:00:00', owner]])
 })
 
 test('existing keys can be renamed with session and origin checks', async t => {
@@ -149,6 +166,69 @@ test('existing keys can be renamed with session and origin checks', async t => {
   assert.equal((await rename(' ')).status, 400)
   assert.deepEqual(await (await rename('  Имя сотрудника  ')).json(), { id: keyId, label: 'Имя сотрудника' })
   assert.deepEqual(calls, [['rename', keyId, 'Имя сотрудника']])
+})
+
+test('catalog list, details and edits require an admin session and same-origin mutations', async t => {
+  const calls = []
+  const row = { id: '4294967295', name_table: 'source_fixture', name: 'Название', info: null }
+  const catalogEditor = {
+    async list(options) { calls.push(['list', options]); return { rows: [row], total: 1, page: options.page, pageSize: 50 } },
+    async get(id) {
+      if (id !== row.id) throw Object.assign(new Error('private details'), { code: 5 })
+      calls.push(['get', id]); return row
+    },
+    async update(id, changes) { calls.push(['update', id, changes]); return { ...row, ...changes } },
+  }
+  const { request, login } = await fixture(t, { catalogEditor })
+  const path = '/api/catalog/' + row.id
+  const changes = { name: 'Новое название', info: 'Описание\n'.repeat(700) }
+  const update = (body, headers) => request(path, { method: 'POST', body, headers })
+  assert.equal((await request('/api/catalog')).status, 401)
+  assert.equal((await request(path)).status, 401)
+  assert.equal((await update({ changes })).status, 401)
+  await login()
+  assert.equal((await update({ changes }, { origin: 'https://foreign.example.test' })).status, 403)
+  assert.equal((await update(changes)).status, 400)
+  assert.equal((await request('/api/catalog?page=0')).status, 400)
+  assert.equal((await request('/api/catalog?q=a&q=b')).status, 400)
+  assert.equal((await request('/api/catalog/4294967296')).status, 400)
+  assert.equal((await request('/api/catalog/1')).status, 404)
+  assert.deepEqual(calls, [])
+
+  const list = await request('/api/catalog?' + new URLSearchParams({ q: 'А & Б', page: '2' }))
+  assert.deepEqual(await list.json(), { rows: [row], total: 1, page: 2, pageSize: 50 })
+  assert.deepEqual(await (await request(path)).json(), { row })
+  assert.deepEqual(await (await update({ changes })).json(), { row: { ...row, ...changes } })
+  assert.deepEqual(calls, [['list', { query: 'А & Б', page: 2 }], ['get', row.id], ['update', row.id, changes]])
+})
+
+test('catalog types are listed and created through the authenticated same-origin admin API', async t => {
+  const types = ['Магазины и ритейл']
+  const catalogEditor = {
+    async listTypes() { return types },
+    async createType(name) {
+      if (name === 'Магазины') throw Object.assign(new Error('database private details'), { code: 6 })
+      types.push(name)
+      return name
+    },
+  }
+  const { request, login } = await fixture(t, { catalogEditor })
+  const url = '/api/catalog/types'
+  const add = (body, headers) => request(url, { method: 'POST', body, headers })
+  assert.equal((await request(url)).status, 401)
+  assert.equal((await add({ name: 'Name' })).status, 401)
+  await login()
+  assert.equal((await add({ name: 'Name' }, { origin: 'https://foreign.example.test' })).status, 403)
+  assert.equal((await add({ name: 'Name', extra: true })).status, 400)
+  assert.equal((await request(url + '?q=x')).status, 400)
+  assert.deepEqual(await (await request(url)).json(), { types: ['Магазины и ритейл'] })
+  const duplicate = await add({ name: 'Магазины' })
+  assert.equal(duplicate.status, 409)
+  assert.match((await duplicate.json()).error, /уже/)
+  const created = await add({ name: 'Наука' })
+  assert.equal(created.status, 201)
+  assert.deepEqual(await created.json(), { type: 'Наука' })
+  assert.deepEqual(await (await request(url)).json(), { types: ['Магазины и ритейл', 'Наука'] })
 })
 
 test('cross-origin, malformed and oversized requests never mutate keys', async t => {

@@ -149,30 +149,37 @@ export class DeviceAccessRepository {
     return { logs, nextCursor: rows.length > limit ? String(logs.at(-1).id) : null }
   }
 
-  async analytics(from) {
+  async analytics(from, owner) {
+    if (owner !== undefined && validateLabel(owner) !== owner) throw invalid()
+    const ownerParams = owner === undefined ? [] : [owner]
+    const ownerFilter = owner === undefined ? '' : ' WHERE CAST(`label` AS BINARY) = CAST(? AS BINARY)'
+    const logFilter = 'WHERE `created_at` >= ?' + (ownerFilter
+      ? ' AND `access_key_id` IN (SELECT `id` FROM `access_keys`' + ownerFilter + ')'
+      : '')
+    const logParams = [from, ...ownerParams]
     const [[keys], [totals], daily, topKeys] = await Promise.all([
       this.execute(`
         SELECT COUNT(*) AS total,
           COUNT(CASE WHEN \`activated_at\` IS NOT NULL AND \`revoked_at\` IS NULL THEN 1 END) AS bound,
           COUNT(CASE WHEN \`activated_at\` IS NULL AND \`revoked_at\` IS NULL THEN 1 END) AS pending,
           COUNT(\`revoked_at\`) AS revoked
-        FROM \`access_keys\``),
+        FROM \`access_keys\`${ownerFilter}`, ownerParams),
       this.execute(`
         SELECT ${logCounts}, COUNT(DISTINCT \`access_key_id\`) AS activeKeys,
           COALESCE(AVG(\`duration_ms\`), 0) AS averageMs
-        FROM \`access_key_logs\` WHERE \`created_at\` >= ?`, [from]),
+        FROM \`access_key_logs\` ${logFilter}`, logParams),
       this.execute(`
         SELECT DATE(\`created_at\`) AS \`day\`, ${logCounts}
-        FROM \`access_key_logs\` WHERE \`created_at\` >= ?
-        GROUP BY \`day\` ORDER BY \`day\``, [from]),
+        FROM \`access_key_logs\` ${logFilter}
+        GROUP BY \`day\` ORDER BY \`day\``, logParams),
       this.execute(`
         SELECT k.\`id\`, k.\`label\`, counts.requests, counts.errors
         FROM (
           SELECT \`access_key_id\`, ${logCounts}
-          FROM \`access_key_logs\` WHERE \`created_at\` >= ?
+          FROM \`access_key_logs\` ${logFilter}
           GROUP BY \`access_key_id\` ORDER BY requests DESC, \`access_key_id\` LIMIT 10
         ) counts INNER JOIN \`access_keys\` k ON k.\`id\` = counts.\`access_key_id\`
-        ORDER BY counts.requests DESC, k.\`id\``, [from]),
+        ORDER BY counts.requests DESC, k.\`id\``, logParams),
     ])
     return {
       keys: { total: Number(keys.total), bound: Number(keys.bound), pending: Number(keys.pending), revoked: Number(keys.revoked) },

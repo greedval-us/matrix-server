@@ -9,7 +9,7 @@ import { ManticoreError } from '../node/modules/search/manticore.mjs'
 const settings = { apiKey: 'reader', maxConcurrentSearches: 1, searchPageSize: 2 }
 const database = { search: { name_table: 'source_7' } }
 const status = { indexedShards: 1, totalShards: 1, partial: false }
-const hit = id => ({ _id: ((7n << 32n) + BigInt(id)).toString(), _source: { payload: { number: '79991234567', fio: 'Имя' } } })
+const hit = (id, databaseId = 7) => ({ _id: ((BigInt(databaseId) << 32n) + BigInt(id)).toString(), _source: { payload: { number: '79991234567', fio: 'Имя' } } })
 const dependencies = {
   readCatalog: async () => ({ byId: new Map([[7, database]]) }),
   readStatus: async () => status,
@@ -30,6 +30,29 @@ test('search use case emits sources, all pages, suggestions and counters without
   assert.deepEqual(messages.at(-2), { object_add_search: { item: [{ key: 'fio', value: 'Имя' }] } })
   assert.deepEqual(messages.at(-1).meta, { total_hits: '3', returned_hits: '3', indexed_shards: 1, total_shards: 1, partial: false, took_ms: 3 })
   assert.equal(service.capacity.active, 0)
+})
+
+test('search keeps published descriptions when operational MySQL is unavailable', async () => {
+  const published = { name_table: 'source_7', name: 'Опубликованное название', info: 'Описание' }
+  const other = { name_table: 'source_8', name: 'Другой источник' }
+  const calls = []
+  const service = new SearchService(settings, {
+    ...dependencies,
+    readCatalog: async () => ({ byId: new Map([[7, { search: published }], [8, { search: other }]]) }),
+    readSourceMetadata: async ids => {
+      calls.push(ids)
+      throw Object.assign(new Error('MySQL unavailable'), { code: grpc.status.UNAVAILABLE })
+    },
+    manticore: { async *searchAll() {
+      yield { hits: [hit(1)], total: 2, tookMs: 1 }
+      yield { hits: [hit(2, 8)], total: 2, tookMs: 1 }
+    } },
+  })
+  const messages = await collect(service.search({ number: '79991234567' }))
+  assert.deepEqual(calls, [[7]])
+  assert.deepEqual(messages.filter(item => item.object_data_base).map(item => item.object_data_base), [published, other])
+  assert.deepEqual(messages.filter(item => item.object_data).map(item => item.object_data.source_name), ['source_7', 'source_8'])
+  assert.equal(messages.at(-1).meta.returned_hits, '2')
 })
 
 test('capacity spans lazy consumption and is released when a consumer stops early', async () => {

@@ -103,3 +103,13 @@ test('catalog snapshots retain nullable raw fields and logs only persist safe me
   assert.deepEqual(queries[1].params, ['search', 'Search', 0, 12])
   assert.ok(!queries[1].sql.includes('apiKey'))
 })
+
+test('search metadata selects only descriptive fields for a bound batch of source IDs', async () => {
+  const rows = [{ id: 7, name_table: 'source_7', name: 'Название', info: null }]
+  const { repo, queries } = await repository([rows])
+  assert.deepEqual(await repo.searchSourceMetadata([]), [])
+  await assert.rejects(repo.searchSourceMetadata([7, '1 OR 1=1']), { code: 3 })
+  assert.equal(queries.length, 0)
+  assert.deepEqual(await repo.searchSourceMetadata([7, 9, 7]), rows)
+  assert.deepEqual(queries, [{ sql: 'SELECT `id`, `name_table`, `name`, `info` FROM `data_base` WHERE `id` IN (?, ?)', params: ['7', '9'] }])
+})

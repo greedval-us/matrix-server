@@ -4,7 +4,9 @@ import { BlockList, isIP } from 'node:net'
 import { DeviceAccessRepository } from '../infrastructure/mysql/device-access.mjs'
 import { createMysqlPool } from '../infrastructure/mysql/pool.mjs'
 import { readMysqlSettings } from '../infrastructure/mysql/settings.mjs'
+import { OperationalRepository } from '../infrastructure/mysql/repository.mjs'
 import { createWebAdminHandler } from './app.mjs'
+import { createCatalogEditor } from './catalog.mjs'
 
 function configuredNetworks(value) {
   if (!value.trim()) return null
@@ -45,6 +47,7 @@ async function main() {
   }))
   try {
     await pool.execute('SELECT `access_keys`.`id`, `access_key_logs`.`access_key_id` FROM `access_keys`, `access_key_logs` LIMIT 0')
+    await pool.execute('SELECT `name`, `alias_for` FROM `catalog_types` LIMIT 0')
     const keys = new DeviceAccessRepository(pool)
     const repository = {
       async list() {
@@ -59,12 +62,13 @@ async function main() {
         const page = await keys.logPage(filters)
         return { ...page, logs: page.logs.map(row => ({ ...row, created_at: isoTimestamp(row.created_at) })) }
       },
-      analytics: from => keys.analytics(from),
+      analytics: (from, owner) => keys.analytics(from, owner),
       issue: label => keys.issue(label),
       rename: (id, label) => keys.rename(id, label),
       revoke: id => keys.revoke(id),
     }
-    const handler = createWebAdminHandler({ repository, passwordHash: passwordHash.trim() })
+    const catalogEditor = createCatalogEditor(new OperationalRepository(pool))
+    const handler = createWebAdminHandler({ repository, catalogEditor, passwordHash: passwordHash.trim() })
     const server = createServer({ cert, key, minVersion: 'TLSv1.2', requestTimeout: 15_000,
       headersTimeout: 10_000, keepAliveTimeout: 5000, maxHeaderSize: 8192 }, handler)
     if (networks) server.on('connection', socket => {
@@ -98,6 +102,6 @@ async function main() {
 }
 
 main().catch(() => {
-  console.error('[matrix-web-admin] startup failed; check HTTPS, secrets, and access-key tables')
+  console.error('[matrix-web-admin] startup failed; check HTTPS, secrets, and database tables')
   process.exitCode = 1
 })

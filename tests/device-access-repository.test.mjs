@@ -143,3 +143,25 @@ test('analytics converts aggregate values while preserving bigint key IDs', asyn
     assert.doesNotMatch(sql, /key_digest|device_key|nonce/)
   }
 })
+
+test('owner analytics binds an exact label across all aggregates before ranking keys', async () => {
+  const owner = "Оператор О'Нил"
+  const from = '2026-11-11 00:00:00'
+  const { actions, pool } = poolWithResponses([
+    [{ total: '3', bound: '1', pending: '1', revoked: '1' }],
+    [{ requests: '3', errors: '1', activeKeys: '2', averageMs: '4.0000' }],
+    [{ day: '2026-11-11', requests: '3', errors: '1' }],
+    [{ id: '8', label: owner, requests: '2', errors: '1' }, { id: '9', label: owner, requests: '1', errors: '0' }],
+  ])
+  const stats = await new DeviceAccessRepository(pool).analytics(from, owner)
+  assert.deepEqual(stats.keys, { total: 3, bound: 1, pending: 1, revoked: 1 })
+  assert.deepEqual(stats.totals, { requests: 3, errors: 1, activeKeys: 2, averageMs: 4 })
+  assert.deepEqual(stats.topKeys.map(key => key.id), ['8', '9'])
+  assert.deepEqual(actions.map(action => action.params), [[owner], [from, owner], [from, owner], [from, owner]])
+  for (const { sql } of actions) {
+    assert.match(sql, /CAST\(`label` AS BINARY\) = CAST\(\? AS BINARY\)/)
+    assert.ok(!sql.includes(owner))
+  }
+  for (const { sql } of actions.slice(1)) assert.match(sql, /`access_key_id` IN \(SELECT `id` FROM `access_keys` WHERE/)
+  assert.match(actions[3].sql, /CAST\(\? AS BINARY\)\)\s+GROUP BY `access_key_id`/)
+})
