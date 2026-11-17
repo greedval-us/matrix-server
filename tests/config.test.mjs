@@ -9,7 +9,7 @@ const environment = { MATRIX_API_KEY: 'search-test-key' }
 
 test('local default uses portable state paths and existing read-only modules', () => {
   const settings = readSettings(environment)
-  assert.deepEqual(settings.moduleIds, ['search', 'catalog'])
+  assert.deepEqual(settings.moduleIds, ['search', 'catalog', 'releases'])
   assert.equal(settings.mysql, null)
   assert.equal(settings.indexStatePath, path.resolve('data/state/indexer.json'))
 })
@@ -29,6 +29,13 @@ test('configuration rejects unknown modules and malformed numeric limits', () =>
   assert.throws(() => readSettings({ ...environment, MATRIX_MODULES: 'search,arbitrary' }), /module/)
   assert.throws(() => readSettings({ ...environment, MATRIX_GRPC_PORT: '50051trailing' }), /MATRIX_GRPC_PORT/)
   assert.throws(() => readSettings({ ...environment, MATRIX_SEARCH_PAGE_SIZE: '0' }), /MATRIX_SEARCH_PAGE_SIZE/)
+})
+
+test('release downloads are enabled by default and can run without MySQL', () => {
+  assert.ok(readSettings(environment).moduleIds.includes('releases'))
+  const settings = readSettings({ ...environment, MATRIX_MODULES: 'releases', MATRIX_RELEASES_DIR: 'data/client-builds' })
+  assert.equal(settings.mysql, null)
+  assert.equal(settings.releasesDirectory, path.resolve('data/client-builds'))
 })
 
 test('API and migration settings preserve the same MySQL password bytes', async () => {

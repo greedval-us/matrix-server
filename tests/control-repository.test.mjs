@@ -4,7 +4,8 @@ import assert from 'node:assert/strict'
 const FILE_A = { id: '11111111-1111-4111-8111-111111111111', name: 'акт.pdf', size: '25', mime_type: 'application/pdf' }
 const FILE_B = { id: '22222222-2222-4222-8222-222222222222', name: 'scan.txt', size: '0', mime_type: 'text/plain' }
 const rawRow = (overrides = {}) => ({ id: '9007199254740993', date: '2026-11-05', number: '+007', fio: 'Иванов И.И.',
-  date_of_birth: null, initiator: 'Заявитель', executor: 'Оператор', note: null, realization: '', intersections: '', files: '[]', ...overrides })
+  date_of_birth: null, initiator: 'Заявитель', executor: 'Оператор', location: 'Неизвестно',
+  note: null, realization: '', intersections: '', files: '[]', ...overrides })
 
 // Only the external MySQL boundary is doubled: SQL, bound parameters and transaction
 // ownership are observable outputs of the real repository.
@@ -43,13 +44,15 @@ test('list returns all explicit display fields and independent attachment metada
     { key: 'group_chat_locality', label: 'Группа, чат, н.п.', type: 'text', sortable: true },
     { key: 'initiator', label: 'Инициатор', type: 'text', sortable: true },
     { key: 'executor', label: 'Исполнитель', type: 'text', sortable: true },
+    { key: 'location', label: 'Находится', type: 'text', sortable: true },
     { key: 'note', label: 'Примечание', type: 'text', sortable: true },
     { key: 'realization', label: 'Реализация', type: 'text', sortable: true },
     { key: 'intersections', label: 'Пересечения', type: 'text', sortable: true },
   ])
   assert.deepEqual(page.rows, [{ id: '9007199254740993', values: { date: '2026-11-05', id: '9007199254740993',
     source_id: '0007', number: '+007', fio: 'Иванов И.И.', date_of_birth: 'около 1990 г.',
-    group_chat_locality: 'Группа', initiator: 'Заявитель', executor: 'Оператор', note: '', realization: '', intersections: '' }, files: [FILE_A] }])
+    group_chat_locality: 'Группа', initiator: 'Заявитель', executor: 'Оператор', location: 'Неизвестно',
+    note: '', realization: '', intersections: '' }, files: [FILE_A] }])
   assert.equal(page.total, '9007199254740995')
   assert.match(calls[0].sql, /ORDER BY `date` DESC, `id` DESC LIMIT \? OFFSET \?$/)
   assert.deepEqual(calls[0].params, [100, 0])
@@ -62,14 +65,38 @@ test('literal global search covers every display field before sorting and paging
   const [select, count] = calls
   assert.ok(!select.sql.includes(query))
   for (const field of ['date', 'id', 'source_id', 'number', 'fio', 'date_of_birth', 'group_chat_locality',
-    'initiator', 'executor', 'note', 'realization', 'intersections']) {
+    'initiator', 'executor', 'location', 'note', 'realization', 'intersections']) {
     assert.match(select.sql.slice(select.sql.indexOf(' WHERE ')), new RegExp('`' + field + '`[^?]*LIKE \\?'))
   }
   assert.match(select.sql, /WHERE .* ORDER BY `initiator` ASC, `id` ASC LIMIT \? OFFSET \?$/)
-  assert.deepEqual(select.params, [...Array(12).fill("%50=%=_==' OR 1==1%"), 20, 40])
-  assert.deepEqual(count.params, Array(12).fill("%50=%=_==' OR 1==1%"))
+  assert.deepEqual(select.params, [...Array(13).fill("%50=%=_==' OR 1==1%"), 20, 40])
+  assert.deepEqual(count.params, Array(13).fill("%50=%=_==' OR 1==1%"))
   assert.equal(select.sql.split(' WHERE ')[1].split(' ORDER BY ')[0], count.sql.split(' WHERE ')[1])
-  assert.equal((select.sql.match(/ESCAPE '='/g) ?? []).length, 12)
+  assert.equal((select.sql.match(/ESCAPE '='/g) ?? []).length, 13)
+})
+
+test('column filters refine quick search and use identical conditions for paged rows and count', async () => {
+  const { repo, calls } = await repository([[], [{ total: '0' }]])
+  const filters = { initiator: '  Отдел_% ', executor: 'Петров', location: 'В РФ', date: '2024-02-29', note: '   ' }
+  await repo.list({ query: 'Иванов', filters, sort_key: 'executor', sort_direction: 'asc', page: 2, page_size: 25 })
+  const [select, count] = calls
+  const where = select.sql.split(' WHERE ')[1].split(' ORDER BY ')[0]
+  assert.equal(where, count.sql.split(' WHERE ')[1])
+  assert.match(where, /^\(.+\) AND COALESCE\(CAST\(`initiator` AS CHAR\), ''\) LIKE \? ESCAPE '=' AND COALESCE\(CAST\(`executor` AS CHAR\), ''\) LIKE \? ESCAPE '=' AND `location` = \? AND `date` = \?$/)
+  const expected = [...Array(13).fill('%Иванов%'), '%Отдел=_=%%', '%Петров%', 'В РФ', '2024-02-29']
+  assert.deepEqual(count.params, expected)
+  assert.deepEqual(select.params, [...expected, 25, 25])
+  assert.match(select.sql, /ORDER BY `executor` ASC, `id` ASC LIMIT \? OFFSET \?$/)
+})
+
+test('unknown filter keys, malformed filters and unsupported exact values never reach SQL', async () => {
+  const { repo, calls } = await repository()
+  for (const filters of [null, [], 'test', { files: 'a' }, { 'fio` OR 1=1': 'x' },
+    JSON.parse('{"__proto__":"a"}'), { number: 100 }, { date: '2025-02-29' },
+    { location: 'РФ' }, { executor: 'x'.repeat(4097) }]) {
+    await assert.rejects(repo.list({ filters }), { code: 3 })
+  }
+  assert.equal(calls.length, 0)
 })
 
 test('proto defaults select the first page and ID sort has no contradictory tiebreaker', async () => {
@@ -140,11 +167,25 @@ test('Telegram ID, plain-text birth date and locality are writable without chang
 test('empty create relies on database date defaults while a blank record date binds NULL', async () => {
   const { repo, calls } = await repository([{ insertId: '1' }, [rawRow({ id: '1' })],
     { insertId: '2' }, [rawRow({ id: '2', date: null })]])
-  await repo.create({})
+  assert.equal((await repo.create({})).values.location, 'Неизвестно')
   assert.match(calls[0].sql, /^INSERT INTO `control` \(\) VALUES \(\)$/)
   assert.deepEqual(calls[0].params, [])
   await repo.create({ date: '', date_of_birth: '' })
   assert.deepEqual(calls[2].params, [null, ''])
+})
+
+test('valid location values are written and returned by the control CRUD', async () => {
+  const { repo, calls } = await repository([
+    { insertId: '1' }, [rawRow({ id: '1', location: 'В РФ' })],
+    { affectedRows: 1 }, [rawRow({ id: '1', location: 'Выехал из РФ' })],
+    { affectedRows: 1 }, [rawRow({ id: '1' })],
+  ])
+  assert.equal((await repo.create({ location: 'В РФ' })).values.location, 'В РФ')
+  assert.equal((await repo.update('1', { location: 'Выехал из РФ' })).values.location, 'Выехал из РФ')
+  assert.equal((await repo.update('1', { location: 'Неизвестно' })).values.location, 'Неизвестно')
+  assert.deepEqual(calls[0].params, ['В РФ'])
+  assert.deepEqual(calls[2].params, ['Выехал из РФ', '1'])
+  assert.deepEqual(calls[4].params, ['Неизвестно', '1'])
 })
 
 test('writes reject immutable fields, nonstrings, impossible calendar dates and byte or character overflow', async () => {
@@ -152,7 +193,7 @@ test('writes reject immutable fields, nonstrings, impossible calendar dates and 
   const invalid = [{ id: '1' }, { files: '[]' }, { unknown: '' }, { note: null }, { number: 'x'.repeat(65) },
     { fio: '😀'.repeat(256) }, { initiator: '😀'.repeat(256) }, { initiator: null }, { executor: 'я'.repeat(256) }, { note: 'я'.repeat(32768) },
     { realization: 'x'.repeat(65536) }, { intersections: '😀'.repeat(16384) },
-    { birth_date_text: '' }, { date_of_birth: 'я'.repeat(32768) },
+    { birth_date_text: '' }, { date_of_birth: 'я'.repeat(32768) }, { location: '' }, { location: 'в рф' }, { location: 'В РФ ' },
     ...['2025-02-29', '2024-04-31', '0999-01-01', '2024-2-03', '0000-00-00', '2024-01-01T00:00:00Z'].map(date => ({ date }))]
   for (const values of invalid) {
     await assert.rejects(repo.create(values), { code: 3 })

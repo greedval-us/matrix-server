@@ -7,6 +7,7 @@ import { readMysqlSettings } from '../infrastructure/mysql/settings.mjs'
 import { OperationalRepository } from '../infrastructure/mysql/repository.mjs'
 import { createWebAdminHandler } from './app.mjs'
 import { createCatalogEditor } from './catalog.mjs'
+import { createFieldLabelEditor } from './field-labels.mjs'
 
 function configuredNetworks(value) {
   if (!value.trim()) return null
@@ -48,6 +49,7 @@ async function main() {
   try {
     await pool.execute('SELECT `access_keys`.`id`, `access_key_logs`.`access_key_id` FROM `access_keys`, `access_key_logs` LIMIT 0')
     await pool.execute('SELECT `name`, `alias_for` FROM `catalog_types` LIMIT 0')
+    await pool.execute('SELECT `field_key`, `label` FROM `search_field_labels` LIMIT 0')
     const keys = new DeviceAccessRepository(pool)
     const repository = {
       async list() {
@@ -62,13 +64,15 @@ async function main() {
         const page = await keys.logPage(filters)
         return { ...page, logs: page.logs.map(row => ({ ...row, created_at: isoTimestamp(row.created_at) })) }
       },
-      analytics: (from, owner) => keys.analytics(from, owner),
+      analytics: (from, owner, result) => keys.analytics(from, owner, result),
       issue: label => keys.issue(label),
       rename: (id, label) => keys.rename(id, label),
       revoke: id => keys.revoke(id),
     }
-    const catalogEditor = createCatalogEditor(new OperationalRepository(pool))
-    const handler = createWebAdminHandler({ repository, catalogEditor, passwordHash: passwordHash.trim() })
+    const operations = new OperationalRepository(pool)
+    const catalogEditor = createCatalogEditor(operations)
+    const fieldLabelEditor = createFieldLabelEditor(operations)
+    const handler = createWebAdminHandler({ repository, catalogEditor, fieldLabelEditor, passwordHash: passwordHash.trim() })
     const server = createServer({ cert, key, minVersion: 'TLSv1.2', requestTimeout: 15_000,
       headersTimeout: 10_000, keepAliveTimeout: 5000, maxHeaderSize: 8192 }, handler)
     if (networks) server.on('connection', socket => {

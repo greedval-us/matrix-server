@@ -8,7 +8,8 @@ export const searchModule = {
     const readFieldLabels = repository?.searchFieldLabels?.bind(repository)
     const service = new SearchService(settings, { readSourceMetadata, readFieldLabels })
     server.addService(loadService('base_search.proto', 'base_search.BaseSearches'), {
-      streamSearch: rpc.stream('search', 'StreamSearch', call => sendStream(call, options => service.search(call.request, options))),
+      streamSearch: rpc.stream('search', 'StreamSearch', (call, observers) =>
+        sendStream(call, options => service.search(call.request, { ...options, ...observers }))),
       getIndexStatus: rpc.unary('search', 'GetIndexStatus', () => service.indexStatus()),
     })
   },

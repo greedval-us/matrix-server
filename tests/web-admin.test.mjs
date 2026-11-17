@@ -3,6 +3,7 @@ import http from 'node:http'
 import test from 'node:test'
 import { createWebAdminHandler } from '../node/web-admin/app.mjs'
 import { hashPassword, isPasswordHash, verifyPassword } from '../node/web-admin/auth.mjs'
+import { createFieldLabelEditor } from '../node/web-admin/field-labels.mjs'
 
 const password = 'test-administrator-password'
 const passwordHash = await hashPassword(password)
@@ -15,7 +16,7 @@ const key = {
   revoked_at: null,
 }
 
-async function fixture(t, { repository = {}, catalogEditor, now } = {}) {
+async function fixture(t, { repository = {}, catalogEditor, fieldLabelEditor, now } = {}) {
   const calls = []
   const dependencies = {
     async list() { return [{ ...key, apiKey: 'do not expose', key_digest: 'do not expose' }] },
@@ -36,7 +37,7 @@ async function fixture(t, { repository = {}, catalogEditor, now } = {}) {
     },
     ...repository,
   }
-  const server = http.createServer(createWebAdminHandler({ repository: dependencies, catalogEditor, passwordHash, now }))
+  const server = http.createServer(createWebAdminHandler({ repository: dependencies, catalogEditor, fieldLabelEditor, passwordHash, now }))
   await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
@@ -156,6 +157,57 @@ test('analytics accepts an exact owner label only for authenticated and valid re
   assert.deepEqual(calls, [['analytics', '2026-11-11 00:00:00', owner]])
 })
 
+test('analytics exposes bounded usage metrics without forwarding private fields', async t => {
+  const calls = []
+  const { request, login } = await fixture(t, {
+    now: () => Date.parse('2026-11-11T10:00:00Z'),
+    repository: {
+      async analytics(from, owner, result) {
+        calls.push([from, owner, result])
+        return {
+          keys: { total: 2, bound: 1, pending: 1, revoked: 0 },
+          totals: { requests: 2, errors: 2, activeKeys: 1, averageMs: 11 },
+          daily: [{ day: '2026-11-11', requests: 2, errors: 2 }], topKeys: [],
+          usage: {
+            successes: 0, cancelled: 0, checks: 1, actions: 1, activeOwners: 1, ownerCount: 1, lastActivity: '2026-11-11 09:00:00.123',
+            daily: [{ day: '2026-11-11', requests: 2, successes: 0, errors: 2, cancelled: 0, actions: 1, checks: 1 }],
+            owners: [{ label: owner, keys: { total: 2, bound: 1, pending: 1, revoked: 0, device_key: 'secret' },
+              requests: 2, successes: 0, errors: 2, cancelled: 0, actions: 1, checks: 1, activeKeys: 1,
+              averageMs: 11, lastActivity: '2026-11-11 09:00:00.123', key_digest: 'secret',
+              search: { requests: 1, withMatches: 0, withoutMatches: 0, unknown: 1, raw_data: 'secret' } }],
+            operations: [{ module: 'search', method: 'StreamSearch', requests: 1, successes: 0, errors: 1, cancelled: 0,
+              averageMs: 18, p95SuccessMs: null, lastActivity: '2026-11-11 09:00:00.123', background: false, raw_data: 'secret' }],
+            errorCodes: [{ code: 14, requests: 2, raw_data: 'secret' }],
+            search: { requests: 1, withMatches: 0, withoutMatches: 0, unknown: 1, knownFields: 1,
+              averageMs: 18, p95SuccessMs: null, fields: [{ field: 'number', requests: 1, raw_data: 'secret' }], raw_data: 'secret' },
+          },
+        }
+      },
+    },
+  })
+  await login()
+  for (const query of ['result=anything', 'result=error&result=all']) {
+    assert.equal((await request('/api/analytics?' + query)).status, 400)
+  }
+  const response = await request('/api/analytics?' + new URLSearchParams({ days: '7', owner: 'Тест', result: 'error' }))
+  assert.equal(response.status, 200)
+  const text = await response.text()
+  assert.doesNotMatch(text, /secret|raw_data|key_digest|device_key/)
+  const { usage } = JSON.parse(text)
+  assert.equal(usage.activeOwners, 1)
+  assert.equal(usage.ownerCount, 1)
+  assert.equal(usage.lastActivity, '2026-11-11T09:00:00.123Z')
+  assert.deepEqual(usage.daily[0], { day: '2026-11-05', requests: 0, successes: 0, errors: 0, cancelled: 0, actions: 0, checks: 0 })
+  assert.equal(usage.owners[0].actions, 1)
+  assert.equal(usage.owners[0].keys.total, 2)
+  assert.equal(usage.operations[0].p95SuccessMs, null)
+  assert.deepEqual(usage.errorCodes, [{ code: 14, requests: 2 }])
+  const search = { requests: 1, withMatches: 0, withoutMatches: 0, unknown: 1 }
+  assert.deepEqual(usage.owners[0].search, search)
+  assert.deepEqual(usage.search, { ...search, knownFields: 1, averageMs: 18, p95SuccessMs: null, fields: [{ field: 'number', requests: 1 }] })
+  assert.deepEqual(calls, [['2026-11-05 00:00:00', 'Тест', 'error']])
+})
+
 test('existing keys can be renamed with session and origin checks', async t => {
   const { request, login, calls } = await fixture(t)
   const path = '/api/keys/' + keyId + '/rename'
@@ -200,6 +252,56 @@ test('catalog list, details and edits require an admin session and same-origin m
   assert.deepEqual(await (await request(path)).json(), { row })
   assert.deepEqual(await (await update({ changes })).json(), { row: { ...row, ...changes } })
   assert.deepEqual(calls, [['list', { query: 'А & Б', page: 2 }], ['get', row.id], ['update', row.id, changes]])
+})
+
+test('search field labels are listed and edited by exact key through the authenticated admin API', async t => {
+  const row = { field_key: 'Phone_%', label: 'Старое имя' }
+  const calls = []
+  const fieldLabelEditor = createFieldLabelEditor({
+    async execute(sql, parameters) {
+      calls.push([sql, parameters])
+      if (sql.startsWith('UPDATE')) {
+        if (parameters[1] === row.field_key) row.label = parameters[0]
+        return {}
+      }
+      if (sql.startsWith('SELECT COUNT')) return [{ total: '1' }]
+      if (sql.includes('WHERE `field_key` = ?') && parameters[0] !== row.field_key) return []
+      return [{ ...row, privateValue: 'discard' }]
+    },
+  })
+  const { request, login } = await fixture(t, { fieldLabelEditor })
+  const root = '/api/field-labels'
+  const edit = root + '/' + encodeURIComponent(row.field_key)
+  const save = (path, body, headers) => request(path, { method: 'POST', body, headers })
+
+  assert.equal((await request(root)).status, 401)
+  assert.equal((await save(edit, { label: 'Новое имя' })).status, 401)
+  await login()
+  assert.equal((await save(edit, { label: 'Новое имя' }, { origin: 'https://invalid.example' })).status, 403)
+  assert.equal((await save(edit, { label: 'Новое имя', field_key: 'other' })).status, 400)
+  assert.equal((await save(edit, { label: ' ' })).status, 400)
+  assert.equal((await save(root + '/%zz', { label: 'Имя' })).status, 400)
+  assert.equal((await request(root + '?page=0')).status, 400)
+  assert.equal((await request(root + '?q=x&q=y')).status, 400)
+  assert.equal((await request(edit)).status, 405)
+  assert.equal((await request(edit, { method: 'DELETE' })).status, 405)
+  assert.equal((await save(root, { label: 'Имя' })).status, 405)
+  assert.deepEqual(calls, [])
+
+  const list = await request(root + '?' + new URLSearchParams({ q: '%_', page: '2' }))
+  assert.equal(list.status, 200)
+  assert.deepEqual(await list.json(), { rows: [row], total: 1, page: 2, pageSize: 50 })
+  assert.match(calls[0][0], /LOCATE\(\?, `field_key` COLLATE utf8mb4_0900_as_ci\)/)
+  assert.deepEqual(calls[0][1], ['%_', '%_', 50, 50])
+  assert.deepEqual(calls[1][1], ['%_', '%_'])
+
+  const missing = await save(root + '/' + encodeURIComponent('phone_%'), { label: 'Иное поле' })
+  assert.equal(missing.status, 404)
+  assert.equal(row.label, 'Старое имя')
+  const updated = await save(edit, { label: ' Новое имя ' })
+  assert.equal(updated.status, 200)
+  assert.deepEqual(await updated.json(), { row: { field_key: 'Phone_%', label: 'Новое имя' } })
+  assert.deepEqual(calls.at(-2), ['UPDATE `search_field_labels` SET `label` = ? WHERE `field_key` = ?', ['Новое имя', 'Phone_%']])
 })
 
 test('catalog types are listed and created through the authenticated same-origin admin API', async t => {

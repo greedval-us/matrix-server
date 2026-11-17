@@ -73,6 +73,18 @@ services:
         condition: service_completed_successfully
     networks: [backend, source]
 
+  release-publish:
+    <<: *api-image
+    profiles: [tools]
+    restart: "no"
+    entrypoint: ["node", "scripts/publish-release.mjs"]
+    command: []
+    environment:
+      MATRIX_RELEASES_DIR: /var/lib/matrix/releases
+    volumes:
+      - client-releases:/var/lib/matrix/releases
+    network_mode: none
+
   manticore:
     <<: *manticore-image
     restart: unless-stopped
@@ -103,8 +115,9 @@ services:
     init: true
     environment:
       <<: *mysql-environment
-      MATRIX_MODULES: search,catalog,workspace,records
+      MATRIX_MODULES: search,catalog,workspace,records,releases
       MATRIX_RECORDS_FILE_DIR: /var/lib/matrix/files
+      MATRIX_RELEASES_DIR: /var/lib/matrix/releases
       MATRIX_AUTH_MODE: ${MATRIX_AUTH_MODE:-shared}
       MATRIX_API_KEY: ${MATRIX_API_KEY:-}
       MATRIX_ADMIN_API_KEY: ${MATRIX_ADMIN_API_KEY:?Set a separate MATRIX_ADMIN_API_KEY}
@@ -124,6 +137,7 @@ services:
     volumes:
       - manticore-state:/var/lib/manticore/state:ro
       - control-files:/var/lib/matrix/files
+      - client-releases:/var/lib/matrix/releases:ro
       - type: bind
         source: ${MATRIX_TLS_DIR:-./docker/tls}
         target: /run/matrix/tls
@@ -243,6 +257,7 @@ networks:
 volumes:
   mysql-data:
   control-files:
+  client-releases:
   manticore-root:
   manticore-config:
   manticore-state:

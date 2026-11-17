@@ -7,8 +7,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node node ./node
 COPY --chown=node:node protos ./protos
 COPY --chown=node:node migrations ./migrations
-COPY --chown=node:node scripts/migrate.mjs scripts/copy_catalog.mjs scripts/access-keys.mjs ./scripts/
-RUN mkdir -p /var/lib/matrix/files && chown node:node /var/lib/matrix/files
+COPY --chown=node:node scripts/migrate.mjs scripts/copy_catalog.mjs scripts/access-keys.mjs scripts/publish-release.mjs ./scripts/
+RUN mkdir -p /var/lib/matrix/files /var/lib/matrix/releases && chown node:node /var/lib/matrix/files /var/lib/matrix/releases
 USER node
 EXPOSE 50051
 CMD ["node", "node/main.mjs"]

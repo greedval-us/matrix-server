@@ -14,6 +14,12 @@ volumes:
       type: none
       o: bind
       device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/control-files
+  client-releases:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MATRIX_DATA_ROOT:?Set MATRIX_DATA_ROOT to an absolute host path}/client-releases
   manticore-root:
     driver: local
     driver_opts:

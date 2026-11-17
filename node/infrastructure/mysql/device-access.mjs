@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import grpc from '@grpc/grpc-js'
 import { ApplicationError } from '../../core/errors.mjs'
+import { SEARCH_FIELDS } from '../../modules/search/normalization.mjs'
 
 const maxId = 18_446_744_073_709_551_615n
 const invalid = () => new ApplicationError(grpc.status.INVALID_ARGUMENT, 'Invalid access key request')
@@ -22,10 +23,45 @@ const logResults = new Map([
   ['cancelled', 'l.`status_code` = 1'],
   ['error', 'l.`status_code` NOT IN (0, 1)'],
 ])
-const logCounts = 'COUNT(*) AS requests, COUNT(CASE WHEN `status_code` NOT IN (0, 1) THEN 1 END) AS errors'
+const backgroundCheck = `(l.\`module\` = 'search' AND l.\`method\` = 'GetIndexStatus'
+  OR l.\`module\` = 'records' AND l.\`method\` = 'GetCapabilities')`
+const logCounts = `COUNT(*) AS requests,
+  COUNT(CASE WHEN l.\`status_code\` = 0 THEN 1 END) AS successes,
+  COUNT(CASE WHEN l.\`status_code\` NOT IN (0, 1) THEN 1 END) AS errors,
+  COUNT(CASE WHEN l.\`status_code\` = 1 THEN 1 END) AS cancelled`
+const checkCount = `COUNT(CASE WHEN ${backgroundCheck} THEN 1 END) AS checks`
+const searchRequest = "l.`module` = 'search' AND l.`method` = 'StreamSearch'"
+const searchOutcomes = `COUNT(*) AS searchRequests,
+  COUNT(CASE WHEN l.\`status_code\` = 0 AND l.\`search_had_matches\` = 1 THEN 1 END) AS withMatches,
+  COUNT(CASE WHEN l.\`status_code\` = 0 AND l.\`search_had_matches\` = 0 THEN 1 END) AS withoutMatches`
+const keyCounts = `COUNT(*) AS total,
+  COUNT(CASE WHEN k.\`activated_at\` IS NOT NULL AND k.\`revoked_at\` IS NULL THEN 1 END) AS bound,
+  COUNT(CASE WHEN k.\`activated_at\` IS NULL AND k.\`revoked_at\` IS NULL THEN 1 END) AS pending,
+  COUNT(k.\`revoked_at\`) AS revoked`
 
 function logMetrics({ requests, errors }) {
   return { requests: Number(requests), errors: Number(errors) }
+}
+
+function keyMetrics({ total, bound, pending, revoked }) {
+  return { total: Number(total), bound: Number(bound), pending: Number(pending), revoked: Number(revoked) }
+}
+
+function outcomes(row) {
+  return { ...logMetrics(row), successes: Number(row.successes), cancelled: Number(row.cancelled) }
+}
+
+function activity(row) {
+  const counts = outcomes(row)
+  const checks = Number(row.checks)
+  return { ...counts, actions: counts.requests - checks, checks }
+}
+
+function searchMetrics(row) {
+  const requests = Number(row.searchRequests)
+  const withMatches = Number(row.withMatches)
+  const withoutMatches = Number(row.withoutMatches)
+  return { requests, withMatches, withoutMatches, unknown: requests - withMatches - withoutMatches }
 }
 
 export class DeviceAccessRepository {
@@ -149,43 +185,145 @@ export class DeviceAccessRepository {
     return { logs, nextCursor: rows.length > limit ? String(logs.at(-1).id) : null }
   }
 
-  async analytics(from, owner) {
+  async analytics(from, owner, result = 'all') {
     if (owner !== undefined && validateLabel(owner) !== owner) throw invalid()
+    if (result !== 'all' && !logResults.has(result)) throw invalid()
     const ownerParams = owner === undefined ? [] : [owner]
-    const ownerFilter = owner === undefined ? '' : ' WHERE CAST(`label` AS BINARY) = CAST(? AS BINARY)'
-    const logFilter = 'WHERE `created_at` >= ?' + (ownerFilter
-      ? ' AND `access_key_id` IN (SELECT `id` FROM `access_keys`' + ownerFilter + ')'
-      : '')
+    const ownerFilter = owner === undefined ? '' : ' WHERE CAST(k.`label` AS BINARY) = CAST(? AS BINARY)'
+    const logFilter = 'WHERE l.`created_at` >= ?' + (ownerFilter
+      ? ' AND l.`access_key_id` IN (SELECT k.`id` FROM `access_keys` k' + ownerFilter + ')'
+      : '') + (result === 'all' ? '' : ' AND ' + logResults.get(result))
     const logParams = [from, ...ownerParams]
-    const [[keys], [totals], daily, topKeys] = await Promise.all([
+    const [[keys], [totals], daily, topKeys, owners, operations, errorCodes, search] = await Promise.all([
       this.execute(`
-        SELECT COUNT(*) AS total,
-          COUNT(CASE WHEN \`activated_at\` IS NOT NULL AND \`revoked_at\` IS NULL THEN 1 END) AS bound,
-          COUNT(CASE WHEN \`activated_at\` IS NULL AND \`revoked_at\` IS NULL THEN 1 END) AS pending,
-          COUNT(\`revoked_at\`) AS revoked
-        FROM \`access_keys\`${ownerFilter}`, ownerParams),
+        SELECT ${keyCounts}, COUNT(DISTINCT CAST(k.\`label\` AS BINARY)) AS ownerCount
+        FROM \`access_keys\` k${ownerFilter}`, ownerParams),
       this.execute(`
-        SELECT ${logCounts}, COUNT(DISTINCT \`access_key_id\`) AS activeKeys,
-          COALESCE(AVG(\`duration_ms\`), 0) AS averageMs
-        FROM \`access_key_logs\` ${logFilter}`, logParams),
+        SELECT ${logCounts}, ${checkCount}, COUNT(DISTINCT l.\`access_key_id\`) AS activeKeys,
+          COUNT(DISTINCT CASE WHEN NOT ${backgroundCheck} THEN CAST(k.\`label\` AS BINARY) END) AS activeOwners,
+          COALESCE(AVG(l.\`duration_ms\`), 0) AS averageMs, MAX(l.\`created_at\`) AS lastActivity
+        FROM \`access_key_logs\` l INNER JOIN \`access_keys\` k ON k.\`id\` = l.\`access_key_id\`
+        ${logFilter}`, logParams),
       this.execute(`
-        SELECT DATE(\`created_at\`) AS \`day\`, ${logCounts}
-        FROM \`access_key_logs\` ${logFilter}
+        SELECT DATE(l.\`created_at\`) AS \`day\`, ${logCounts}, ${checkCount}
+        FROM \`access_key_logs\` l ${logFilter}
         GROUP BY \`day\` ORDER BY \`day\``, logParams),
       this.execute(`
         SELECT k.\`id\`, k.\`label\`, counts.requests, counts.errors
         FROM (
-          SELECT \`access_key_id\`, ${logCounts}
-          FROM \`access_key_logs\` ${logFilter}
-          GROUP BY \`access_key_id\` ORDER BY requests DESC, \`access_key_id\` LIMIT 10
+          SELECT l.\`access_key_id\`, ${logCounts}
+          FROM \`access_key_logs\` l ${logFilter}
+          GROUP BY l.\`access_key_id\` ORDER BY requests DESC, l.\`access_key_id\` LIMIT 10
         ) counts INNER JOIN \`access_keys\` k ON k.\`id\` = counts.\`access_key_id\`
         ORDER BY counts.requests DESC, k.\`id\``, logParams),
+      this.execute(`
+        WITH key_activity AS (
+          SELECT l.\`access_key_id\`, ${logCounts}, ${checkCount},
+            COUNT(CASE WHEN ${searchRequest} THEN 1 END) AS searchRequests,
+            COUNT(CASE WHEN ${searchRequest} AND l.\`status_code\` = 0 AND l.\`search_had_matches\` = 1 THEN 1 END) AS withMatches,
+            COUNT(CASE WHEN ${searchRequest} AND l.\`status_code\` = 0 AND l.\`search_had_matches\` = 0 THEN 1 END) AS withoutMatches,
+            SUM(l.\`duration_ms\`) AS durationTotal, MAX(l.\`created_at\`) AS lastActivity
+          FROM \`access_key_logs\` l ${logFilter}
+          GROUP BY l.\`access_key_id\`
+        )
+        SELECT ANY_VALUE(k.\`label\`) AS label, ${keyCounts}, COUNT(a.\`access_key_id\`) AS activeKeys,
+          COALESCE(SUM(a.requests), 0) AS requests, COALESCE(SUM(a.successes), 0) AS successes,
+          COALESCE(SUM(a.errors), 0) AS errors, COALESCE(SUM(a.cancelled), 0) AS cancelled,
+          COALESCE(SUM(a.checks), 0) AS checks, COALESCE(SUM(a.requests - a.checks), 0) AS actions,
+          COALESCE(SUM(a.searchRequests), 0) AS searchRequests,
+          COALESCE(SUM(a.withMatches), 0) AS withMatches, COALESCE(SUM(a.withoutMatches), 0) AS withoutMatches,
+          COALESCE(SUM(a.durationTotal) / NULLIF(SUM(a.requests), 0), 0) AS averageMs,
+          MAX(a.lastActivity) AS lastActivity
+        FROM \`access_keys\` k LEFT JOIN key_activity a ON a.\`access_key_id\` = k.\`id\`${ownerFilter}
+        GROUP BY CAST(k.\`label\` AS BINARY)
+        ORDER BY actions DESC, requests DESC, CAST(k.\`label\` AS BINARY) LIMIT 20`, [...logParams, ...ownerParams]),
+      this.execute(`
+        WITH filtered_logs AS (
+          SELECT l.\`module\`, l.\`method\`, l.\`status_code\`, l.\`duration_ms\`, l.\`created_at\`
+          FROM \`access_key_logs\` l ${logFilter}
+        ), operations AS (
+          SELECT l.\`module\`, l.\`method\`, ${logCounts}, AVG(l.\`duration_ms\`) AS averageMs,
+            MAX(l.\`created_at\`) AS lastActivity
+          FROM filtered_logs l GROUP BY l.\`module\`, l.\`method\`
+          ORDER BY requests DESC, l.\`module\`, l.\`method\` LIMIT 50
+        ), success_durations AS (
+          SELECT l.\`module\`, l.\`method\`, l.\`duration_ms\`, COUNT(*) AS samples
+          FROM filtered_logs l INNER JOIN operations o USING (\`module\`, \`method\`)
+          WHERE l.\`status_code\` = 0 GROUP BY l.\`module\`, l.\`method\`, l.\`duration_ms\`
+        ), ranked_durations AS (
+          SELECT \`module\`, \`method\`, \`duration_ms\`,
+            SUM(samples) OVER (PARTITION BY \`module\`, \`method\` ORDER BY \`duration_ms\`) AS cumulative,
+            SUM(samples) OVER (PARTITION BY \`module\`, \`method\`) AS sampleCount
+          FROM success_durations
+        ), percentiles AS (
+          SELECT \`module\`, \`method\`, MIN(\`duration_ms\`) AS p95SuccessMs
+          FROM ranked_durations WHERE cumulative >= CEIL(sampleCount * 0.95) GROUP BY \`module\`, \`method\`
+        )
+        SELECT o.*, p.p95SuccessMs FROM operations o LEFT JOIN percentiles p USING (\`module\`, \`method\`)
+        ORDER BY o.requests DESC, o.\`module\`, o.\`method\``, logParams),
+      this.execute(`
+        SELECT l.\`status_code\` AS code, COUNT(*) AS requests
+        FROM \`access_key_logs\` l ${logFilter} AND l.\`status_code\` NOT IN (0, 1)
+        GROUP BY l.\`status_code\` ORDER BY requests DESC, code`, logParams),
+      this.#readSearchUsage(logFilter, logParams),
     ])
     return {
-      keys: { total: Number(keys.total), bound: Number(keys.bound), pending: Number(keys.pending), revoked: Number(keys.revoked) },
+      keys: keyMetrics(keys),
       totals: { ...logMetrics(totals), activeKeys: Number(totals.activeKeys), averageMs: Number(totals.averageMs) },
       daily: daily.map(row => ({ day: row.day, ...logMetrics(row) })),
       topKeys: topKeys.map(row => ({ id: String(row.id), label: row.label, ...logMetrics(row) })),
+      usage: {
+        successes: Number(totals.successes), cancelled: Number(totals.cancelled),
+        actions: Number(totals.requests) - Number(totals.checks), checks: Number(totals.checks),
+        activeOwners: Number(totals.activeOwners), ownerCount: Number(keys.ownerCount), lastActivity: totals.lastActivity,
+        daily: daily.map(row => ({ day: row.day, ...activity(row) })),
+        owners: owners.map(row => ({
+          label: row.label, keys: keyMetrics(row), ...activity(row), activeKeys: Number(row.activeKeys),
+          averageMs: Number(row.averageMs), lastActivity: row.lastActivity, search: searchMetrics(row),
+        })),
+        operations: operations.map(row => ({
+          module: row.module, method: row.method, ...outcomes(row), averageMs: Number(row.averageMs),
+          p95SuccessMs: row.p95SuccessMs === null ? null : Number(row.p95SuccessMs), lastActivity: row.lastActivity,
+          background: (row.module === 'search' && row.method === 'GetIndexStatus') ||
+            (row.module === 'records' && row.method === 'GetCapabilities'),
+        })),
+        errorCodes: errorCodes.map(row => ({ code: Number(row.code), requests: Number(row.requests) })),
+        search,
+      },
+    }
+  }
+
+  async #readSearchUsage(logFilter, logParams) {
+    const rows = await this.execute(`
+      WITH filtered_searches AS (
+        SELECT l.\`id\`, l.\`status_code\`, l.\`duration_ms\`, l.\`search_had_matches\`, l.\`search_fields\`
+        FROM \`access_key_logs\` l ${logFilter} AND ${searchRequest}
+      ), summary AS (
+        SELECT ${searchOutcomes}, AVG(l.\`duration_ms\`) AS averageMs FROM filtered_searches l
+      ), successful_durations AS (
+        SELECT \`duration_ms\`, COUNT(*) AS samples FROM filtered_searches
+        WHERE \`status_code\` = 0 GROUP BY \`duration_ms\`
+      ), ranked_durations AS (
+        SELECT \`duration_ms\`, SUM(samples) OVER (ORDER BY \`duration_ms\`) AS cumulative,
+          SUM(samples) OVER () AS sampleCount FROM successful_durations
+      ), field_keys (\`field\`) AS (
+        ${SEARCH_FIELDS.map(() => 'SELECT ?').join(' UNION ALL ')}
+      ), known_field_uses AS (
+        SELECT s.\`id\`, f.\`field\` FROM filtered_searches s
+        INNER JOIN field_keys f ON JSON_CONTAINS(s.\`search_fields\`, JSON_QUOTE(f.\`field\`))
+      ), field_counts AS (
+        SELECT \`field\`, COUNT(*) AS requests FROM known_field_uses GROUP BY \`field\`
+      )
+      SELECT summary.*, f.\`field\`, f.requests AS fieldRequests,
+        (SELECT COUNT(DISTINCT \`id\`) FROM known_field_uses) AS knownFields,
+        (SELECT MIN(\`duration_ms\`) FROM ranked_durations WHERE cumulative >= CEIL(sampleCount * 0.95)) AS p95SuccessMs
+      FROM summary LEFT JOIN field_counts f ON TRUE ORDER BY f.requests DESC, f.\`field\``, [...logParams, ...SEARCH_FIELDS])
+    const [summary] = rows
+    return {
+      ...searchMetrics(summary), knownFields: Number(summary.knownFields),
+      averageMs: summary.averageMs === null ? null : Number(summary.averageMs),
+      p95SuccessMs: summary.p95SuccessMs === null ? null : Number(summary.p95SuccessMs),
+      fields: rows.filter(row => row.field !== null).map(row => ({ field: row.field, requests: Number(row.fieldRequests) })),
     }
   }
 }

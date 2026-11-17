@@ -63,7 +63,9 @@ export function normalizeQuery(field, value) {
       (maximum, part) => Math.max(maximum, [...part].length),
       0,
     )
-    const required = MIN_WILDCARD_LITERAL[field]
+    const required = field === 'number' && /^[0-9]+%$/u.test(pattern)
+      ? 4
+      : MIN_WILDCARD_LITERAL[field]
     if (longestLiteral < required) {
       throw new InvalidSearchQuery(
         `Wildcard search for ${field} requires at least ${required} consecutive characters`,

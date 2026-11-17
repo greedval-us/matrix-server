@@ -4,6 +4,10 @@ import { CONTROL_COLUMNS, CONTROL_FIELDS, MAX_ROW_FILES, listOptions, readFiles,
 const quote = key => `\`${key}\``
 const selection = [...CONTROL_FIELDS, 'files'].map(quote).join(', ')
 const missing = () => new ApplicationError(5, 'Control record or file was not found')
+const substringCondition = key => `COALESCE(CAST(${quote(key)} AS CHAR), '') LIKE ? ESCAPE '='`
+
+// Explicit escaping keeps %, _ and = literal independently of SQL mode.
+const substringPattern = value => `%${value.replace(/[=%_]/g, character => `=${character}`)}%`
 
 function databaseError(error) {
   if (error instanceof ApplicationError) return error
@@ -78,12 +82,19 @@ export class ControlRepository {
   }
 
   async list(request = {}) {
-    const { query, key, direction, limit, offset } = listOptions(request)
-    // An explicit escape character makes %, _ and = literal independently of
-    // MySQL's NO_BACKSLASH_ESCAPES mode, while the value remains a bound parameter.
-    const pattern = `%${query.replace(/[=%_]/g, value => `=${value}`)}%`
-    const where = query ? ` WHERE (${CONTROL_FIELDS.map(field => `COALESCE(CAST(${quote(field)} AS CHAR), '') LIKE ? ESCAPE '='`).join(' OR ')})` : ''
-    const parameters = query ? CONTROL_FIELDS.map(() => pattern) : []
+    const { query, filters, key, direction, limit, offset } = listOptions(request)
+    const conditions = []
+    const parameters = []
+    if (query) {
+      conditions.push(`(${CONTROL_FIELDS.map(substringCondition).join(' OR ')})`)
+      parameters.push(...CONTROL_FIELDS.map(() => substringPattern(query)))
+    }
+    for (const [field, value] of filters) {
+      const exact = field === 'date' || field === 'location'
+      conditions.push(exact ? `${quote(field)} = ?` : substringCondition(field))
+      parameters.push(exact ? value : substringPattern(value))
+    }
+    const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : ''
     const order = `${quote(key)} ${direction}${key === 'id' ? '' : `, \`id\` ${direction}`}`
     const rows = await this.execute(`SELECT ${selection} FROM \`control\`${where} ORDER BY ${order} LIMIT ? OFFSET ?`, [...parameters, limit, offset])
     const [count] = await this.execute(`SELECT CAST(COUNT(*) AS CHAR) AS total FROM \`control\`${where}`, parameters)

@@ -6,7 +6,23 @@ const login = byId('login');
 const dashboard = byId('dashboard');
 const pageTitle = byId('page-title');
 const showAccess = byId('show-access');
+const showAnalytics = byId('show-analytics');
+const analyticsView = byId('analytics-view');
 const showCatalog = byId('show-catalog');
+const showFieldLabels = byId('show-field-labels');
+const fieldLabelsView = byId('field-labels-view');
+const fieldLabelSearch = byId('field-label-search');
+const fieldLabelNotice = byId('field-label-notice');
+const fieldLabelMessage = byId('field-label-message');
+const fieldLabelTable = byId('field-label-table');
+const fieldLabelRows = byId('field-label-rows');
+const fieldLabelPagination = byId('field-label-pagination');
+const fieldLabelPrev = byId('field-label-prev');
+const fieldLabelNext = byId('field-label-next');
+const fieldLabelDialog = byId('field-label-dialog');
+const fieldLabelForm = byId('field-label-form');
+const fieldLabelValue = byId('field-label-value');
+const fieldLabelEditMessage = byId('field-label-edit-message');
 const catalogView = byId('catalog-view');
 const catalogSearch = byId('catalog-search');
 const catalogNotice = byId('catalog-notice');
@@ -57,12 +73,16 @@ const revokeForm = byId('revoke-form');
 const revokeButton = byId('open-revoke');
 const analyticsDays = byId('analytics-days');
 const analyticsOwner = byId('analytics-owner');
+const analyticsResult = byId('analytics-result');
+const analyticsSort = byId('analytics-sort');
+const analyticsExport = byId('analytics-export');
 const analyticsContent = byId('analytics-content');
 const analyticsMessage = byId('analytics-message');
 
 const dateFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'medium' });
 const dayFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 const numberFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
+const percentFormat = new Intl.NumberFormat('ru-RU', { style: 'percent', maximumFractionDigits: 1 });
 const catalogFields = ['name', 'info', 'relevance_date', 'country', 'type', 'trust'];
 const operations = new Map(Object.entries({
   GetIndexStatus: 'Проверка поискового индекса',
@@ -77,6 +97,11 @@ const operations = new Map(Object.entries({
   DownloadFile: 'Скачивание файла',
   RemoveFile: 'Удаление файла',
 }));
+const searchFieldNames = new Map(Object.entries({
+  number: 'Телефон', mail: 'Электронная почта', snils: 'СНИЛС', inn: 'ИНН', passport: 'Паспорт',
+  fio: 'ФИО', date_of_birth: 'Дата рождения', telegram: 'Telegram', vk: 'ВКонтакте',
+  facebook: 'Facebook', imsi: 'IMSI', imei: 'IMEI', grz: 'Госномер', vin: 'VIN',
+}));
 const modules = new Map([['search', 'Поиск'], ['catalog', 'Каталог'], ['records', 'Записи'], ['workspace', 'Рабочие таблицы']]);
 const results = new Map([
   [0, 'Успешно'], [1, 'Отменено'], [2, 'Неизвестная ошибка'], [3, 'Некорректный запрос'],
@@ -89,12 +114,18 @@ let session = new AbortController();
 let keyRequest;
 let logRequest;
 let analyticsRequest;
+let analyticsSnapshot;
 let catalogListRequest;
 let catalogEditRequest;
 let catalogQuery = '';
 let catalogPage = 1;
 let catalogLastPage = 1;
 let catalogDraft;
+let fieldLabelRequest;
+let fieldLabelQuery = '';
+let fieldLabelPage = 1;
+let fieldLabelLastPage = 1;
+let fieldLabelDraft;
 let keys = [];
 let selectedId = '';
 let revokeId = '';
@@ -198,14 +229,24 @@ function showLogin(text = '') {
   logRequest?.abort();
   analyticsRequest?.abort();
   resetCatalog();
+  resetFieldLabels();
   keys = [];
   selectedId = '';
   keyList.replaceChildren();
   logRows.replaceChildren();
   byId('daily-rows').replaceChildren();
   byId('top-keys').replaceChildren();
+  byId('analytics-owner-rows').replaceChildren();
+  byId('analytics-operation-rows').replaceChildren();
+  byId('analytics-search-field-rows').replaceChildren();
+  byId('analytics-search-owner').textContent = '';
+  byId('analytics-error-codes').replaceChildren();
+  analyticsSnapshot = undefined;
+  analyticsExport.disabled = true;
   logFilters.reset();
   analyticsDays.value = '7';
+  analyticsResult.value = 'all';
+  analyticsSort.value = 'requests';
   renderOwnerOptions();
   keySearch.value = '';
   keyStatusFilter.value = 'active';
@@ -389,7 +430,7 @@ async function refreshKeys(preferredId, revealKey) {
       const [kind] = keyStatus(selected);
       keyStatusFilter.value = kind === 'pending' ? 'unused' : kind;
     }
-    if (renderOwnerOptions()) void refreshAnalytics();
+    if (renderOwnerOptions() && !analyticsView.hidden) void refreshAnalytics();
     renderKeys();
     renderDetails();
   } catch (error) {
@@ -402,15 +443,135 @@ async function refreshKeys(preferredId, revealKey) {
   }
 }
 
-function renderAnalytics({ totals, daily, topKeys }) {
-  byId('metric-requests').textContent = numberFormat.format(totals.requests);
-  byId('metric-errors').textContent = numberFormat.format(totals.errors);
-  byId('metric-active').textContent = numberFormat.format(totals.activeKeys);
-  byId('metric-duration').textContent = totals.requests ? numberFormat.format(totals.averageMs) + ' мс' : '—';
+function openAnalyticsKey(id) {
+  const key = keys.find(row => row.id === String(id));
+  if (!key) return;
+  keySearch.value = '';
+  keyStatusFilter.value = 'all';
+  byId('log-days').value = analyticsDays.value;
+  logMethod.value = '';
+  byId('log-result').value = analyticsResult.value === 'all' ? '' : analyticsResult.value;
+  selectedId = key.id;
+  showDashboardSection('access');
+  renderKeys();
+  renderDetails();
+  void loadLogs();
+  journalTitle.focus();
+}
 
-  const maximum = Math.max(1, ...daily.map(({ requests }) => requests));
+function renderAnalyticsOperations() {
+  const rows = analyticsSnapshot?.stats.usage?.operations ?? [];
+  const sort = analyticsSort.value;
+  const sorted = [...rows].sort((a, b) =>
+    (b[sort] ?? -1) - (a[sort] ?? -1) || b.requests - a.requests);
+  byId('analytics-operation-rows').replaceChildren(...sorted.map(row => {
+    const tr = element('tr');
+    const name = element('th');
+    name.scope = 'row';
+    const title = operations.get(row.method) || row.method;
+    name.append(element('strong', title), element('span',
+      row.background ? 'Служебная проверка' : (modules.get(row.module) || row.module), 'analytics-meta'));
+    const errors = element('td', numberFormat.format(row.errors));
+    if (analyticsResult.value === 'all' && row.errors && row.requests) {
+      errors.append(element('span', percentFormat.format(row.errors / row.requests), 'analytics-meta'));
+    }
+    tr.append(name,
+      element('td', numberFormat.format(row.requests)),
+      element('td', numberFormat.format(row.successes)),
+      errors,
+      element('td', numberFormat.format(row.cancelled)),
+      element('td', row.p95SuccessMs == null ? '—' : numberFormat.format(row.p95SuccessMs) + ' мс'));
+    return tr;
+  }));
+  byId('analytics-operations-table').hidden = !rows.length;
+  byId('analytics-operations-empty').hidden = Boolean(rows.length);
+}
+
+function renderSearchAnalytics(search) {
+  byId('analytics-search-panel').hidden = !search;
+  if (!search) return;
+  const { requests, withMatches, withoutMatches, unknown, averageMs, p95SuccessMs, knownFields, fields } = search;
+  byId('analytics-search-owner').textContent = analyticsOwner.value || 'Все владельцы';
+  byId('analytics-search-empty').hidden = requests > 0;
+  byId('analytics-search-content').hidden = requests === 0;
+  byId('search-metric-requests').textContent = numberFormat.format(requests);
+  const knownOutcomes = withMatches + withoutMatches;
+  byId('search-metric-empty').textContent = knownOutcomes ? numberFormat.format(withoutMatches) : '—';
+  byId('search-metric-outcomes').textContent = unknown
+    ? `Итог известен для ${numberFormat.format(knownOutcomes)} из ${numberFormat.format(requests)}`
+    : '';
+  const duration = value => value == null ? '—'
+    : value >= 1000 ? numberFormat.format(value / 1000) + ' с' : numberFormat.format(value) + ' мс';
+  byId('search-metric-average').textContent = duration(averageMs);
+  byId('search-metric-p95').textContent = duration(p95SuccessMs);
+  byId('analytics-search-coverage').textContent = knownFields
+    ? `Поля известны для ${numberFormat.format(knownFields)} из ${numberFormat.format(requests)} запросов. В одном запросе может быть несколько полей.`
+    : 'За выбранный период нет запросов с сохранёнными именами полей.';
+  byId('analytics-search-fields').hidden = !fields.length;
+  byId('analytics-search-field-rows').replaceChildren(...fields.map(({ field, requests }) => {
+    const row = element('tr');
+    const name = element('th', searchFieldNames.get(field) || field);
+    name.scope = 'row';
+    const count = element('td');
+    const barAndCount = element('div', undefined, 'daily-total');
+    const bar = element('meter');
+    bar.max = Math.max(knownFields, 1);
+    bar.value = requests;
+    bar.setAttribute('aria-hidden', 'true');
+    barAndCount.append(bar, element('span', numberFormat.format(requests)));
+    count.append(barAndCount);
+    row.append(name, count, element('td', knownFields ? percentFormat.format(requests / knownFields) : '—'));
+    return row;
+  }));
+}
+
+function renderAnalytics({ totals, topKeys, usage }) {
+  byId('metric-actions').textContent = numberFormat.format(usage.actions);
+  byId('metric-checks').textContent = 'Служебных проверок: ' + numberFormat.format(usage.checks);
+  byId('metric-active').textContent = numberFormat.format(usage.activeOwners);
+  byId('metric-errors').textContent = numberFormat.format(totals.errors);
+  byId('metric-cancelled').textContent = numberFormat.format(usage.cancelled);
+
+  const owners = usage.owners;
+  byId('analytics-owners-table').hidden = !owners.length;
+  byId('analytics-owners-empty').hidden = Boolean(owners.length);
+  byId('analytics-owner-count').textContent = analyticsOwner.value
+    ? 'Выбранный владелец'
+    : `Показано ${numberFormat.format(owners.length)} из ${numberFormat.format(usage.ownerCount ?? owners.length)}`;
+  byId('analytics-owner-rows').replaceChildren(...owners.map(owner => {
+    const row = element('tr');
+    const name = element('th');
+    name.scope = 'row';
+    if (analyticsOwner.value === owner.label) name.append(element('strong', owner.label));
+    else {
+      const button = element('button', owner.label, 'log-key');
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        if (![...analyticsOwner.options].some(option => option.value === owner.label)) return;
+        analyticsOwner.value = owner.label;
+        analyticsOwner.focus();
+        void refreshAnalytics();
+      });
+      name.append(button);
+    }
+    const keyCount = element('td', numberFormat.format(owner.keys.total));
+    keyCount.append(element('span', numberFormat.format(owner.keys.bound) + ' привязано', 'analytics-meta'));
+    const activity = element('td', numberFormat.format(owner.actions));
+    activity.append(element('span', numberFormat.format(owner.checks) + ' проверок', 'analytics-meta'));
+    const search = element('td', owner.search ? numberFormat.format(owner.search.requests) : '—');
+    if (owner.search && (owner.search.withMatches || owner.search.withoutMatches)) {
+      search.append(element('span', numberFormat.format(owner.search.withoutMatches) + ' без совпадений', 'analytics-meta'));
+    }
+    row.append(name, keyCount, activity, search, element('td', numberFormat.format(owner.errors)),
+      element('td', numberFormat.format(owner.cancelled)), element('td', timestamp(owner.lastActivity), 'time-cell'));
+    return row;
+  }));
+  renderSearchAnalytics(usage.search);
+  renderAnalyticsOperations();
+
+  const maximum = Math.max(1, ...usage.daily.map(({ actions }) => actions));
   const days = document.createDocumentFragment();
-  for (const { day, requests, errors } of [...daily].reverse()) {
+  for (const { day, actions, checks, errors } of [...usage.daily].reverse()) {
     const row = element('tr');
     const date = new Date(day + 'T00:00:00Z');
     const time = element('time', dayFormat.format(date));
@@ -421,21 +582,28 @@ function renderAnalytics({ totals, daily, topKeys }) {
     const barAndCount = element('div', undefined, 'daily-total');
     const bar = element('meter');
     bar.max = maximum;
-    bar.value = requests;
+    bar.value = actions;
     bar.setAttribute('aria-hidden', 'true');
-    barAndCount.append(bar, element('span', numberFormat.format(requests)));
+    barAndCount.append(bar, element('span', numberFormat.format(actions)));
     totalCell.append(barAndCount);
-    row.append(dateCell, totalCell, element('td', numberFormat.format(errors)));
+    row.append(dateCell, totalCell, element('td', numberFormat.format(checks)), element('td', numberFormat.format(errors)));
     days.append(row);
   }
   byId('daily-rows').replaceChildren(days);
+  byId('analytics-errors-empty').hidden = Boolean(usage.errorCodes.length);
+  byId('analytics-error-codes').replaceChildren(...usage.errorCodes.map(({ code, requests }) => {
+    const row = element('div');
+    row.append(element('dt', (results.get(code) || 'Ошибка') + ' (' + code + ')'),
+      element('dd', numberFormat.format(requests)));
+    return row;
+  }));
 
   const top = document.createDocumentFragment();
   for (const { id, label, requests, errors } of topKeys) {
     const item = element('li');
     const button = element('button', undefined, 'top-key');
     button.type = 'button';
-    button.addEventListener('click', () => selectKey(String(id), true));
+    button.addEventListener('click', () => openAnalyticsKey(id));
     const name = element('span', undefined, 'top-key-name');
     name.append(element('span', label), element('span', '№' + id, 'key-id'));
     const metrics = element('span', undefined, 'top-key-metrics');
@@ -452,22 +620,76 @@ function renderAnalytics({ totals, daily, topKeys }) {
 }
 
 async function refreshAnalytics() {
+  if (analyticsView.hidden) return;
   analyticsRequest?.abort();
   const controller = new AbortController();
   analyticsRequest = controller;
   analyticsContent.hidden = true;
+  byId('analytics-metrics').hidden = true;
+  analyticsSnapshot = undefined;
+  analyticsExport.disabled = true;
   message(analyticsMessage, 'Загружаем аналитику…');
   const params = new URLSearchParams({ days: analyticsDays.value });
   if (analyticsOwner.value) params.set('owner', analyticsOwner.value);
+  if (analyticsResult.value !== 'all') params.set('result', analyticsResult.value);
   try {
     const stats = await authenticatedRequest('/api/analytics?' + params, { signal: controller.signal });
     if (controller.signal.aborted) return;
+    if (!stats.usage) throw new Error('Сервер не вернул данные аналитики.');
+    analyticsSnapshot = { stats, filters: Object.fromEntries(params) };
     renderAnalytics(stats);
     analyticsContent.hidden = false;
+    byId('analytics-metrics').hidden = false;
+    analyticsExport.disabled = false;
     message(analyticsMessage);
   } catch (error) {
     if (!controller.signal.aborted) message(analyticsMessage, error.message, true);
   }
+}
+
+function downloadAnalytics() {
+  if (!analyticsSnapshot) return;
+  const { stats: { totals, topKeys, usage }, filters } = analyticsSnapshot;
+  const exportRows = [
+    ['Раздел', 'Наименование', 'Период (дни, UTC)', 'Владелец', 'Результат',
+      'Запросы', 'Операции', 'Служебные проверки', 'Успешно', 'Ошибки', 'Отмены',
+      'Среднее, мс', 'p95 успешных, мс', 'Последний запрос (UTC)', 'Ключи', 'Привязано', 'Активные владельцы',
+      'Ожидают привязки', 'Отозвано', 'Поиски', 'С совпадениями', 'Без совпадений',
+      'Итог поиска неизвестен', 'Поиски с известными полями'],
+  ];
+  const add = (section, name, data) => exportRows.push([
+    section, name, filters.days, filters.owner || '', filters.result || 'all', data.requests,
+    data.actions, data.checks, data.successes, data.errors, data.cancelled, data.averageMs,
+    data.p95SuccessMs, data.lastActivity, data.keys?.total, data.keys?.bound, data.activeOwners,
+    data.keys?.pending, data.keys?.revoked,
+    data.search?.requests, data.search?.withMatches, data.search?.withoutMatches,
+    data.search?.unknown, data.search?.knownFields,
+  ]);
+  add('Итого', '', { ...totals, ...usage });
+  for (const owner of usage.owners) add('Владелец', owner.label, owner);
+  if (usage.search) {
+    const { averageMs, p95SuccessMs, fields } = usage.search;
+    add('Поиск', '', { averageMs, p95SuccessMs, search: usage.search });
+    for (const { field, requests } of fields) add('Поле поиска', field, { requests });
+  }
+  for (const operation of usage.operations) {
+    add(operation.background ? 'Проверка' : 'Операция', operation.module + '/' + operation.method, operation);
+  }
+  for (const day of usage.daily) add('День', day.day, day);
+  for (const { code, requests } of usage.errorCodes) add('Код ошибки', String(code), { errors: requests });
+  for (const key of topKeys) add('Ключ', key.label + ' №' + key.id, key);
+  const cell = value => {
+    const text = String(value ?? '');
+    const escaped = typeof value === 'string' && /^[\s\uFEFF]*[=+@-]/u.test(text) ? "'" + text : text;
+    return '"' + escaped.replaceAll('"', '""') + '"';
+  };
+  const csv = '\uFEFF' + exportRows.map(row => row.map(cell).join(';')).join('\r\n') + '\r\n';
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = element('a');
+  link.href = url;
+  link.download = 'matrix-analytics.csv';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function setPending(form, pending) {
@@ -476,14 +698,122 @@ function setPending(form, pending) {
 }
 
 function showDashboardSection(section) {
-  const catalog = section === 'catalog';
   for (const region of dashboard.querySelectorAll('[data-dashboard-view]')) {
     region.hidden = region.dataset.dashboardView !== section;
   }
-  showAccess.setAttribute('aria-pressed', String(!catalog));
-  showCatalog.setAttribute('aria-pressed', String(catalog));
-  pageTitle.textContent = catalog ? 'Каталог баз' : 'Управление доступом';
-  if (!catalog) catalogListRequest?.abort();
+  const sections = [
+    ['access', showAccess, 'Управление доступом'],
+    ['analytics', showAnalytics, 'Аналитика'],
+    ['catalog', showCatalog, 'Каталог баз'],
+    ['field-labels', showFieldLabels, 'Поля поиска'],
+  ];
+  for (const [name, button, title] of sections) {
+    button.setAttribute('aria-pressed', String(section === name));
+    if (section === name) pageTitle.textContent = title;
+  }
+  if (section !== 'catalog') catalogListRequest?.abort();
+  if (section !== 'field-labels') fieldLabelRequest?.abort();
+  if (section !== 'analytics') analyticsRequest?.abort();
+}
+
+function resetFieldLabelEditor() {
+  fieldLabelDraft = undefined;
+  fieldLabelForm.reset();
+  setPending(fieldLabelForm, false);
+  byId('field-label-edit-key').textContent = '';
+  message(fieldLabelEditMessage);
+}
+
+function resetFieldLabels() {
+  fieldLabelRequest?.abort();
+  fieldLabelQuery = '';
+  fieldLabelPage = 1;
+  fieldLabelLastPage = 1;
+  fieldLabelSearch.value = '';
+  fieldLabelRows.replaceChildren();
+  fieldLabelTable.hidden = true;
+  fieldLabelPagination.hidden = true;
+  byId('field-label-count').textContent = '';
+  message(fieldLabelNotice);
+  message(fieldLabelMessage);
+  if (fieldLabelDialog.open) fieldLabelDialog.close();
+  resetFieldLabelEditor();
+}
+
+function fieldLabelRow(row) {
+  const tr = element('tr');
+  const title = element('td');
+  title.append(element('strong', row.label));
+  const key = element('td');
+  key.append(element('code', row.field_key, 'catalog-table-name'));
+  const edit = element('button', 'Изменить', 'button');
+  edit.type = 'button';
+  edit.dataset.fieldKey = row.field_key;
+  edit.setAttribute('aria-label', 'Изменить подпись поля «' + row.field_key + '»');
+  edit.addEventListener('click', () => {
+    resetFieldLabelEditor();
+    fieldLabelDraft = row;
+    byId('field-label-edit-key').textContent = row.field_key;
+    fieldLabelValue.value = row.label;
+    fieldLabelDialog.showModal();
+    fieldLabelValue.focus();
+  });
+  const action = element('td');
+  action.append(edit);
+  tr.append(title, key, action);
+  return tr;
+}
+
+async function loadFieldLabels(page = fieldLabelPage, savedKey) {
+  fieldLabelRequest?.abort();
+  const controller = new AbortController();
+  fieldLabelRequest = controller;
+  const focused = document.activeElement;
+  const paging = focused === fieldLabelPrev || focused === fieldLabelNext;
+  fieldLabelTable.hidden = true;
+  fieldLabelPagination.hidden = true;
+  fieldLabelRows.replaceChildren();
+  message(fieldLabelMessage, 'Загружаем поля…');
+  const params = new URLSearchParams({ page: String(page) });
+  if (fieldLabelQuery) params.set('q', fieldLabelQuery);
+  try {
+    const { rows, total, page: current, pageSize } = await authenticatedRequest(
+      '/api/field-labels?' + params, { signal: controller.signal },
+    );
+    if (controller.signal.aborted || session.signal.aborted) return;
+    fieldLabelLastPage = Math.max(1, Math.ceil(total / pageSize));
+    if (current > fieldLabelLastPage) {
+      void loadFieldLabels(fieldLabelLastPage, savedKey);
+      return;
+    }
+    fieldLabelPage = current;
+    if (!rows.length) {
+      message(fieldLabelMessage, fieldLabelQuery ? 'По этому запросу поля не найдены.' : 'Подписей полей пока нет.');
+      if (document.activeElement === document.body && (savedKey || paging)) fieldLabelSearch.focus();
+      return;
+    }
+    const offset = (current - 1) * pageSize;
+    byId('field-label-count').textContent =
+      `${numberFormat.format(offset + 1)}–${numberFormat.format(offset + rows.length)} из ${numberFormat.format(total)}`;
+    fieldLabelRows.replaceChildren(...rows.map(fieldLabelRow));
+    fieldLabelPrev.disabled = current === 1;
+    fieldLabelNext.disabled = current >= fieldLabelLastPage;
+    fieldLabelTable.scrollTop = 0;
+    fieldLabelTable.hidden = false;
+    fieldLabelPagination.hidden = false;
+    message(fieldLabelMessage);
+    if (document.activeElement === document.body) {
+      if (savedKey) {
+        const edit = [...fieldLabelRows.querySelectorAll('button')].find(button => button.dataset.fieldKey === savedKey);
+        (edit || fieldLabelSearch).focus();
+      } else if (paging) fieldLabelTable.focus({ preventScroll: true });
+    }
+  } catch (error) {
+    if (!controller.signal.aborted && !session.signal.aborted) {
+      message(fieldLabelMessage, error.message, true);
+      if (document.activeElement === document.body && (savedKey || paging)) fieldLabelSearch.focus();
+    }
+  }
 }
 
 function resetCatalogEditor() {
@@ -638,15 +968,84 @@ async function openCatalogEditor(id) {
 }
 
 showAccess.addEventListener('click', () => {
-  if (catalogView.hidden) return;
+  if (showAccess.getAttribute('aria-pressed') === 'true') return;
   showDashboardSection('access');
   pageTitle.focus();
+});
+showAnalytics.addEventListener('click', () => {
+  if (!analyticsView.hidden) return;
+  showDashboardSection('analytics');
+  pageTitle.focus();
+  void refreshAnalytics();
 });
 showCatalog.addEventListener('click', () => {
   if (!catalogView.hidden) return;
   showDashboardSection('catalog');
   pageTitle.focus();
   void loadCatalog();
+});
+showFieldLabels.addEventListener('click', () => {
+  if (!fieldLabelsView.hidden) return;
+  showDashboardSection('field-labels');
+  pageTitle.focus();
+  void loadFieldLabels();
+});
+byId('field-label-search-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const query = fieldLabelSearch.value.trim();
+  if ([...query].length > 255) {
+    message(fieldLabelNotice, 'Сократите запрос до 255 символов.', true);
+    fieldLabelSearch.focus();
+    return;
+  }
+  message(fieldLabelNotice);
+  fieldLabelQuery = query;
+  void loadFieldLabels(1);
+});
+fieldLabelPrev.addEventListener('click', () => {
+  if (fieldLabelPage > 1) void loadFieldLabels(fieldLabelPage - 1);
+});
+fieldLabelNext.addEventListener('click', () => {
+  if (fieldLabelPage < fieldLabelLastPage) void loadFieldLabels(fieldLabelPage + 1);
+});
+byId('field-label-cancel').addEventListener('click', () => fieldLabelDialog.close());
+fieldLabelDialog.addEventListener('cancel', (event) => {
+  if (fieldLabelForm.dataset.pending === 'true') event.preventDefault();
+});
+fieldLabelDialog.addEventListener('close', () => {
+  if (!fieldLabelDialog.open) resetFieldLabelEditor();
+});
+fieldLabelForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!fieldLabelDraft || fieldLabelForm.dataset.pending === 'true') return;
+  const label = fieldLabelValue.value.trim();
+  if (!label || [...label].length > 255) {
+    message(fieldLabelEditMessage, 'Введите подпись длиной от 1 до 255 символов.', true);
+    fieldLabelValue.focus();
+    return;
+  }
+  const { field_key: key, label: current } = fieldLabelDraft;
+  if (label === current) {
+    message(fieldLabelEditMessage, 'Изменений нет.');
+    return;
+  }
+  const { signal } = session;
+  message(fieldLabelEditMessage);
+  setPending(fieldLabelForm, true);
+  try {
+    await authenticatedRequest('/api/field-labels/' + encodeURIComponent(key), { method: 'POST', data: { label } });
+    if (signal.aborted) return;
+    fieldLabelDialog.close();
+    message(fieldLabelNotice, 'Подпись сохранена.');
+    void loadFieldLabels(fieldLabelPage, key);
+  } catch (error) {
+    if (!signal.aborted) message(fieldLabelEditMessage, error.message, true);
+  } finally {
+    if (!signal.aborted) {
+      setPending(fieldLabelForm, false);
+      if (fieldLabelDialog.open) fieldLabelValue.focus();
+    }
+  }
 });
 byId('catalog-search-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -773,13 +1172,16 @@ logout.addEventListener('click', async () => {
     await authenticatedRequest('/api/session', { method: 'DELETE' });
     showLogin();
   } catch (error) {
-    if (!session.signal.aborted) message(catalogView.hidden ? notice : catalogNotice, error.message, true);
+    if (!session.signal.aborted) {
+      const activeNotice = !analyticsView.hidden ? analyticsMessage
+        : !fieldLabelsView.hidden ? fieldLabelNotice : !catalogView.hidden ? catalogNotice : notice;
+      message(activeNotice, error.message, true);
+    }
   } finally { logout.disabled = false; }
 });
 
 function refreshDashboard(preferredId, { revealKey = false } = {}) {
   void refreshKeys(preferredId, revealKey);
-  void refreshAnalytics();
 }
 
 refresh.addEventListener('click', () => { message(notice); refreshDashboard(); });
@@ -787,6 +1189,13 @@ keySearch.addEventListener('input', () => { if (!keyRequest || !refresh.disabled
 keyStatusFilter.addEventListener('change', () => { if (!keyRequest || !refresh.disabled || keys.length) renderKeys(); });
 analyticsDays.addEventListener('change', () => void refreshAnalytics());
 analyticsOwner.addEventListener('change', () => void refreshAnalytics());
+analyticsResult.addEventListener('change', () => void refreshAnalytics());
+analyticsSort.addEventListener('change', renderAnalyticsOperations);
+byId('analytics-refresh').addEventListener('click', () => {
+  void refreshKeys();
+  void refreshAnalytics();
+});
+analyticsExport.addEventListener('click', downloadAnalytics);
 showAllLogs.addEventListener('click', () => selectKey('', true));
 for (const [method, label] of operations) {
   const option = element('option', label);

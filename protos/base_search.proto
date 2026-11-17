@@ -18,6 +18,7 @@ message SearchRequest {
   string grz = 13;
   string vin = 14;
   int32 limit = 15;
+  bool supports_large_results = 16;
 }
 
 message DataBase {

@@ -55,6 +55,70 @@ test('search keeps published descriptions when operational MySQL is unavailable'
   assert.equal(messages.at(-1).meta.returned_hits, '2')
 })
 
+test('audit gets field names and a Boolean only after a complete result stream', async () => {
+  const cases = [
+    { hits: [hit(1)], total: 1, complete: true, outcome: [true] },
+    { hits: [], total: 0, complete: true, outcome: [false] },
+    { hits: [], total: 0, complete: false, outcome: [] },
+    { hits: [], total: 0, complete: undefined, outcome: [] },
+    { hits: [hit(1)], total: 2, complete: true, outcome: [] },
+    { hits: [hit(1)], total: 1, complete: true, partial: true, outcome: [] },
+  ]
+  for (const { hits, total, complete, partial = false, outcome } of cases) {
+    const service = new SearchService(settings, {
+      ...dependencies, readStatus: async () => ({ ...status, partial }),
+      manticore: { async *searchAll() { yield { hits, total, complete, tookMs: 1 } } },
+    })
+    const fields = []
+    const matches = []
+    await collect(service.search({ mail: 'synthetic@example.invalid', number: '79991234567', unknown: 'private' }, {
+      onSearchFields: names => fields.push(names), onSearchComplete: hadMatches => matches.push(hadMatches),
+    }))
+    assert.deepEqual(fields, [['number', 'mail']])
+    assert.deepEqual(matches, outcome)
+  }
+})
+
+test('cancelling even after yielding final meta does not create a completed audit outcome', async () => {
+  const controller = new AbortController()
+  const service = new SearchService(settings, {
+    ...dependencies,
+    manticore: { async *searchAll() { yield { hits: [], total: 0, complete: true, tookMs: 1 } } },
+  })
+  const iterator = service.search({ number: '79991234567' }, {
+    signal: controller.signal, onSearchComplete: () => assert.fail('cancelled search marked completed'),
+  })
+  assert.equal((await iterator.next()).value.meta.returned_hits, '0')
+  controller.abort()
+  assert.equal((await iterator.next()).done, true)
+})
+
+test('short phone prefixes stream all matches to a large-result client', async () => {
+  const service = new SearchService({ ...settings, manticoreTable: 'matrix_records' }, {
+    ...dependencies,
+    readPrefixShards: async () => ({ status, tables: ['matrix_row_0001', 'matrix_row_0002'] }),
+    manticore: { async *searchBroad(expression, size, { tables }) {
+      assert.equal(expression, '(@number "7978*")')
+      assert.equal(size, 2)
+      assert.deepEqual(tables, ['matrix_row_0001', 'matrix_row_0002'])
+      yield { hits: [], tookMs: 1 }
+      yield { hits: [hit(1), hit(2)], tookMs: 2 }
+      yield { hits: [hit(3)], tookMs: 3 }
+    } },
+  })
+  await assert.rejects(collect(service.search({ number: '7978%' })), { code: grpc.status.FAILED_PRECONDITION })
+  const observed = []
+  const result = await collect(service.search({ number: '7978%', supports_large_results: true }, {
+    onSearchFields: fields => observed.push(fields), onSearchComplete: matches => observed.push(matches),
+  }))
+  assert.deepEqual(result.filter(row => row.object_data).map(row => row.object_data.fields.id), ['1', '2', '3'])
+  assert.equal(result.at(-1).meta.total_hits, '3')
+  assert.equal(result.at(-1).meta.returned_hits, '3')
+  assert.equal(result.at(-1).meta.took_ms, 6)
+  assert.deepEqual(observed, [['number'], true])
+  assert.equal(service.capacity.active, 0)
+})
+
 test('capacity spans lazy consumption and is released when a consumer stops early', async () => {
   let released = false
   const manticore = { async *searchAll() {

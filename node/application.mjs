@@ -22,7 +22,7 @@ export async function createApplication(settings, dependencies = {}) {
     let deviceRepository = dependencies.deviceRepository
     if (settings.authMode === 'device' && !deviceRepository) {
       if (!pool) throw new Error('Device authorization requires an operational MySQL connection')
-      await pool.execute('SELECT 1 FROM `access_keys`, `access_key_nonces`, `access_key_logs` LIMIT 0')
+      await pool.execute('SELECT `access_key_logs`.`search_fields`, `access_key_logs`.`search_had_matches` FROM `access_keys`, `access_key_nonces`, `access_key_logs` LIMIT 0')
       const { DeviceAccessRepository } = await import('./infrastructure/mysql/device-access.mjs')
       deviceRepository = new DeviceAccessRepository(pool)
     }

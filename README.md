@@ -35,14 +35,14 @@ node scripts/checkPublication.mjs
 не изменяет GitHub и другие существующие копии.
 
 Для ручного запуска скопируйте `.env.example` в `.env`, замените ключи и выполните
-`node --env-file=.env node/main.mjs`. По умолчанию пример включает `search,catalog`,
+`node --env-file=.env node/main.mjs`. По умолчанию пример включает `search,catalog,releases`,
 оставляет `MATRIX_MYSQL_HOST` пустым и позволяет запуск без MySQL. Каталог читается
 из опубликованного JSON, а поиск требует доступной Manticore и готовых индексов.
 Тесты используют локальные заглушки и не обращаются к исходным базам.
 
 Для операционного каталога настройте `MATRIX_MYSQL_HOST/PORT/USER/PASSWORD/DATABASE`,
 выполните `npm run migrate`, затем включите
-`MATRIX_MODULES=search,catalog,workspace,records`. Для workspace требуется отдельный
+`MATRIX_MODULES=search,catalog,workspace,records,releases`. Для workspace требуется отдельный
 `MATRIX_ADMIN_API_KEY`, отличный от поискового `MATRIX_API_KEY`. Изменение схемы
 выполняется только явной миграцией. Пароль MySQL можно передать через
 `MATRIX_MYSQL_PASSWORD_FILE`, убрав переменную `MATRIX_MYSQL_PASSWORD` целиком.
@@ -58,6 +58,8 @@ node scripts/checkPublication.mjs
   чтение `service_logs`; только явно зарегистрированные ресурсы и поля.
 - `node/modules/records`: таблица `control` в рабочей MySQL и API вкладки
   «Записи», включая потоковые вложения. [Контракт и хранение файлов](docs/control-records.md).
+- `node/modules/releases`: версии клиента и потоковая загрузка EXE/AppImage с
+  текущим ключом доступа, без дополнительной БД. [Публикация приложения](docs/client-releases.md).
 - `node/infrastructure/mysql` и `migrations`: параметризованные запросы и версии схемы.
 - `scripts/build_manticore_indexes.py`: независимые подключения к каталогу и источнику,
   возобновляемые шарды, проверка `indextool`, публикация после сетевого reload.

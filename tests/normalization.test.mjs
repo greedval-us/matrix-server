@@ -27,6 +27,16 @@ test('short wildcard queries are rejected', () => {
   assert.throws(() => normalizeQuery('number', '12%'), InvalidSearchQuery)
 })
 
+test('phone prefixes with a single trailing percent require four digits', () => {
+  assert.equal(buildManticoreQuery({ number: '7978%' }).expression, '(@number "7978*")')
+  assert.equal(normalizeQuery('number', '79781%').manticorePattern, '"79781*"')
+  assert.throws(() => normalizeQuery('number', '797%'), /at least 4 consecutive/)
+  for (const pattern of ['%7978', '79?78%', '7978%%', '7978%1']) {
+    assert.throws(() => normalizeQuery('number', pattern), /at least 6 consecutive/)
+  }
+  assert.throws(() => normalizeQuery('imei', '7978%'), /at least 6 consecutive/)
+})
+
 test('multiple fields are combined with implicit AND', () => {
   assert.equal(
     buildManticoreQuery({ number: '79991234567', inn: '1234567890' }).expression,

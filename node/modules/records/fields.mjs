@@ -10,6 +10,7 @@ export const CONTROL_COLUMNS = Object.freeze([
   { key: 'group_chat_locality', label: 'Группа, чат, н.п.', type: 'text', sortable: true },
   { key: 'initiator', label: 'Инициатор', type: 'text', sortable: true },
   { key: 'executor', label: 'Исполнитель', type: 'text', sortable: true },
+  { key: 'location', label: 'Находится', type: 'text', sortable: true },
   { key: 'note', label: 'Примечание', type: 'text', sortable: true },
   { key: 'realization', label: 'Реализация', type: 'text', sortable: true },
   { key: 'intersections', label: 'Пересечения', type: 'text', sortable: true },
@@ -20,6 +21,8 @@ export const MAX_ROW_FILES = 1000
 const UINT64_MAX = 18446744073709551615n
 const writable = new Set(CONTROL_FIELDS.filter(key => key !== 'id'))
 const text = new Set(['date_of_birth', 'note', 'realization', 'intersections'])
+const locations = new Set(['В РФ', 'Выехал из РФ', 'Неизвестно'])
+const maxSearchCharacters = 4096
 export const invalid = () => new ApplicationError(3, 'Invalid control record request')
 
 export function validateId(id) {
@@ -44,6 +47,7 @@ export function validateValues(values, { create = false } = {}) {
   return entries.map(([key, value]) => {
     if (!writable.has(key) || typeof value !== 'string') throw invalid()
     if (key === 'date') return [key, value === '' ? null : calendarDate(value)]
+    if (key === 'location' && !locations.has(value)) throw invalid()
     if (text.has(key) ? Buffer.byteLength(value, 'utf8') > 65_535 : [...value].length > (key === 'number' ? 64 : 255)) throw invalid()
     return [key, value]
   })
@@ -79,12 +83,28 @@ export function readFiles(value) {
 
 export function listOptions(request = {}) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw invalid()
-  const { query = '', sort_key = '', sort_direction = '', page = 0, page_size = 0 } = request
-  if (typeof query !== 'string' || [...query].length > 4096
+  const { query = '', filters = {}, sort_key = '', sort_direction = '', page = 0, page_size = 0 } = request
+  if (typeof query !== 'string' || [...query].length > maxSearchCharacters
     || (sort_key !== '' && !CONTROL_FIELDS.includes(sort_key))
     || !['', 'asc', 'desc'].includes(sort_direction)
     || !Number.isSafeInteger(page) || page < 0 || page > 4_294_967_295
     || !Number.isSafeInteger(page_size) || page_size < 0 || page_size > 1000) throw invalid()
   const limit = page_size || 100
-  return { query, key: sort_key || 'date', direction: (sort_direction || 'desc').toUpperCase(), limit, offset: ((page || 1) - 1) * limit }
+  return { query, filters: validateFilters(filters), key: sort_key || 'date',
+    direction: (sort_direction || 'desc').toUpperCase(), limit, offset: ((page || 1) - 1) * limit }
+}
+
+function validateFilters(filters) {
+  if (!filters || typeof filters !== 'object' || Array.isArray(filters)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(filters))) throw invalid()
+  const selected = []
+  for (const [key, input] of Object.entries(filters)) {
+    if (!CONTROL_FIELDS.includes(key) || typeof input !== 'string' || [...input].length > maxSearchCharacters) throw invalid()
+    const value = input.trim()
+    if (!value) continue
+    if (key === 'date') calendarDate(value)
+    if (key === 'location' && !locations.has(value)) throw invalid()
+    selected.push([key, value])
+  }
+  return selected
 }

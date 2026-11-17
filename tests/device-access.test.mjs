@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import grpc from '@grpc/grpc-js'
 import { createApplication } from '../node/application.mjs'
@@ -149,6 +153,73 @@ test('registered gRPC search uses the device identity for its audit entry', asyn
   assert.ok(!JSON.stringify(logs).includes(apiKey))
 })
 
+test('personal gRPC searches audit fields and completed outcomes without logging request or result contents', async t => {
+  const logs = []
+  const directory = await mkdtemp(path.join(tmpdir(), 'matrix-search-audit-'))
+  const catalog = path.join(directory, 'catalog.json')
+  const state = path.join(directory, 'state.json')
+  const databaseId = 7
+  const privateValue = 'synthetic-private-value'
+  await writeFile(catalog, JSON.stringify({ databases: [{ id: databaseId, name_table: 'test_source' }] }))
+  await writeFile(state, JSON.stringify({ status: 'completed', total_shards: 1, completed_shards: [0] }))
+  const hit = { _id: ((BigInt(databaseId) << 32n) + 1n).toString(), _source: { payload: { about: 'synthetic-private-result' } } }
+  const responses = [
+    { hits: { total: 1, total_relation: 'eq', hits: [hit] } },
+    { hits: { total: 0, total_relation: 'eq', hits: [] } },
+    { warning: { reason: 'test timeout' }, hits: { total: 0, total_relation: 'eq', hits: [] } },
+    { error: privateValue },
+  ]
+  const upstream = createServer((request, response) => {
+    request.resume()
+    response.end(JSON.stringify(responses.shift()))
+  })
+  upstream.listen(0, '127.0.0.1')
+  await once(upstream, 'listening')
+  t.after(async () => {
+    upstream.closeAllConnections()
+    await new Promise(resolve => upstream.close(resolve))
+    await rm(directory, { recursive: true, force: true })
+  })
+  const settings = readSettings({
+    MATRIX_AUTH_MODE: 'device', MATRIX_MODULES: 'search',
+    MATRIX_MYSQL_HOST: 'mysql', MATRIX_MYSQL_USER: 'matrix', MATRIX_MYSQL_PASSWORD: 'example',
+    MATRIX_GRPC_TLS_CERT: 'server.crt', MATRIX_GRPC_TLS_KEY: 'server.key',
+    MANTICORE_URL: `http://127.0.0.1:${upstream.address().port}`,
+    MATRIX_DATABASE_CATALOG: catalog, MANTICORE_INDEX_STATE: state,
+  })
+  const app = await createApplication(settings, {
+    repository: { appendLog: async value => logs.push(value) },
+    deviceRepository: { authorize: async () => '12' },
+  })
+  t.after(() => app.close())
+  const port = await new Promise((resolve, reject) => {
+    app.server.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (error, value) => error ? reject(error) : resolve(value))
+  })
+  const Client = grpc.makeGenericClientConstructor(loadService('base_search.proto', 'base_search.BaseSearches'), 'BaseSearches')
+  const client = new Client(`127.0.0.1:${port}`, grpc.credentials.createInsecure())
+  t.after(() => client.close())
+  const identity = generateKeyPairSync('ed25519')
+  async function search(request) {
+    const { metadata } = signedCall(identity, { path: '/base_search.BaseSearches/StreamSearch', time: String(Date.now()) })
+    const call = client.streamSearch(request, metadata, { deadline: Date.now() + 3000 })
+    for await (const _message of call) { /* Drain the stream to its terminal status. */ }
+  }
+  await search({ fio: privateValue, number: '79991234567' })
+  await search({ email: privateValue, mail: 'synthetic@example.invalid' })
+  await search({ fio: privateValue })
+  await assert.rejects(search({ fio: privateValue }), { code: grpc.status.UNAVAILABLE })
+  client.close()
+  await app.close()
+  assert.deepEqual(logs.map(({ statusCode, accessKeyId, searchFields, searchHadMatches }) =>
+    [statusCode, accessKeyId, searchFields, searchHadMatches]), [
+    [grpc.status.OK, '12', ['number', 'fio'], true],
+    [grpc.status.OK, '12', ['mail'], false],
+    [grpc.status.OK, '12', ['fio'], undefined],
+    [grpc.status.UNAVAILABLE, '12', ['fio'], undefined],
+  ])
+  assert.doesNotMatch(JSON.stringify(logs), /synthetic|79991234567|test timeout/u)
+})
+
 test('a cancelled unary request is not executed after delayed device authorization', async () => {
   let resolveAuthorization
   const authorization = new Promise(resolve => { resolveAuthorization = resolve })
@@ -164,4 +235,37 @@ test('a cancelled unary request is not executed after delayed device authorizati
   assert.equal(responded, false)
   assert.equal(logs[0].statusCode, grpc.status.CANCELLED)
   assert.equal(logs[0].accessKeyId, '12')
+})
+
+test('a search cancelled during personal authorization records one attributed cancellation', async () => {
+  let resolveAuthorization
+  const authorization = new Promise(resolve => { resolveAuthorization = resolve })
+  const logs = []
+  const handlers = createRpcHandlers({ authorize: () => authorization, audit: { record: log => logs.push(log) } })
+  const handler = handlers.stream('search', 'StreamSearch', () => assert.fail('cancelled request reached the handler'))
+  const call = Object.assign(new EventEmitter(), { cancelled: false, request: { number: '70000000001' } })
+  const pending = handler(call)
+  call.cancelled = true
+  call.emit('cancelled')
+  resolveAuthorization({ accessKeyId: '12' })
+  await pending
+  call.emit('close')
+  assert.deepEqual(logs.map(({ statusCode, accessKeyId, searchHadMatches, searchFields }) =>
+    [statusCode, accessKeyId, searchHadMatches, searchFields]), [[grpc.status.CANCELLED, '12', undefined, undefined]])
+})
+
+test('stream audit discards an observed search outcome when the transport cancels', async () => {
+  const logs = []
+  const handlers = createRpcHandlers({ authorize: async () => ({ accessKeyId: '12' }), audit: { record: log => logs.push(log) } })
+  const handler = handlers.stream('search', 'StreamSearch', (call, { onSearchFields, onSearchComplete }) => {
+    onSearchFields(['number'])
+    onSearchComplete(true)
+    call.emit('cancelled')
+    call.emit('finish')
+  })
+  await handler(new EventEmitter())
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0].statusCode, grpc.status.CANCELLED)
+  assert.deepEqual(logs[0].searchFields, ['number'])
+  assert.equal(Object.hasOwn(logs[0], 'searchHadMatches'), false)
 })

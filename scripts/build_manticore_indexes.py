@@ -589,7 +589,6 @@ def build_active_config(completed: list[int], settings: dict) -> str:
         f"  listen = {settings.get('listen_host', '127.0.0.1')}:9308:http",
         f"  listen = {settings.get('listen_host', '127.0.0.1')}:9312",
         f"  log = {settings['log_dir'] / 'searchd.log'}",
-        f"  query_log = {settings['log_dir'] / 'query.log'}",
         f"  pid_file = {settings['pid_file']}",
         f"  binlog_path = {data_dir / 'runtime'}",
         "  seamless_rotate = 1",

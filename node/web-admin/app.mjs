@@ -101,6 +101,47 @@ function periodStart(time, days) {
   return `${utcDay(time, days - 1)} 00:00:00`
 }
 
+function usageCounts({ requests = 0, successes = 0, errors = 0, cancelled = 0 } = {}) {
+  return { requests, successes, errors, cancelled }
+}
+
+function usageActivity(row = {}) {
+  return { ...usageCounts(row), actions: row.actions ?? 0, checks: row.checks ?? 0 }
+}
+
+function usageTimestamp(value) {
+  return value ? value.replace(' ', 'T') + 'Z' : null
+}
+
+function searchOutcomes({ requests, withMatches, withoutMatches, unknown }) {
+  return { requests, withMatches, withoutMatches, unknown }
+}
+
+function usageMetadata(usage, days) {
+  const daily = new Map(usage.daily.map(row => [row.day, row]))
+  return {
+    successes: usage.successes, cancelled: usage.cancelled, actions: usage.actions, checks: usage.checks,
+    activeOwners: usage.activeOwners, ownerCount: usage.ownerCount, lastActivity: usageTimestamp(usage.lastActivity),
+    daily: days.map(({ day }) => ({ day, ...usageActivity(daily.get(day)) })),
+    owners: usage.owners.map(row => {
+      const { total, bound, pending, revoked } = row.keys
+      return { label: row.label, keys: { total, bound, pending, revoked }, ...usageActivity(row),
+        activeKeys: row.activeKeys, averageMs: row.averageMs, lastActivity: usageTimestamp(row.lastActivity),
+        ...(row.search ? { search: searchOutcomes(row.search) } : {}) }
+    }),
+    operations: usage.operations.map(row => ({
+      module: row.module, method: row.method, ...usageCounts(row), averageMs: row.averageMs,
+      p95SuccessMs: row.p95SuccessMs, lastActivity: usageTimestamp(row.lastActivity), background: row.background,
+    })),
+    errorCodes: usage.errorCodes.map(({ code, requests }) => ({ code, requests })),
+    ...(usage.search ? { search: {
+      ...searchOutcomes(usage.search), knownFields: usage.search.knownFields,
+      averageMs: usage.search.averageMs, p95SuccessMs: usage.search.p95SuccessMs,
+      fields: usage.search.fields.map(({ field, requests }) => ({ field, requests })),
+    } } : {}),
+  }
+}
+
 function keyMetadata({ id, label, created_at, activated_at, revoked_at }) {
   return { id: String(id), label, created_at, activated_at, revoked_at }
 }
@@ -117,7 +158,7 @@ function publicError(error) {
   return new HttpError(500, 'Не удалось выполнить запрос.')
 }
 
-export function createWebAdminHandler({ repository, catalogEditor, passwordHash, now = Date.now }) {
+export function createWebAdminHandler({ repository, catalogEditor, fieldLabelEditor, passwordHash, now = Date.now }) {
   if (!isPasswordHash(passwordHash)) throw new Error('Invalid web admin password hash')
   const sessions = createSessions(now)
   const reserveLogin = createLoginLimiter(now)
@@ -146,24 +187,29 @@ export function createWebAdminHandler({ repository, catalogEditor, passwordHash,
   }
 
   async function analytics(response, query) {
-    const { days = '7', owner } = readFilters(query, ['days', 'owner'])
+    const { days = '7', owner, result } = readFilters(query, ['days', 'owner', 'result'])
     if (!allowedPeriods.has(days)) throw invalidFilter()
     if (owner !== undefined && normalizeLabel(owner) !== owner) throw invalidFilter()
+    if (result !== undefined && result !== 'all' && !logResults.has(result)) throw invalidFilter()
     const dayCount = Number(days)
     const time = now()
-    const { keys, totals, daily, topKeys } = await repository.analytics(periodStart(time, dayCount), owner)
+    const from = periodStart(time, dayCount)
+    const { keys, totals, daily, topKeys, usage } = result === undefined
+      ? await repository.analytics(from, owner) : await repository.analytics(from, owner, result)
     const { total, bound, pending, revoked } = keys
     const { requests, errors, activeKeys, averageMs } = totals
     const byDay = new Map(daily.map(row => [row.day, row]))
+    const daysInPeriod = Array.from({ length: dayCount }, (_, index) => {
+      const day = utcDay(time, dayCount - index - 1)
+      const { requests = 0, errors = 0 } = byDay.get(day) ?? {}
+      return { day, requests, errors }
+    })
     return json(response, 200, {
       keys: { total, bound, pending, revoked },
       totals: { requests, errors, activeKeys, averageMs },
-      daily: Array.from({ length: dayCount }, (_, index) => {
-        const day = utcDay(time, dayCount - index - 1)
-        const { requests = 0, errors = 0 } = byDay.get(day) ?? {}
-        return { day, requests, errors }
-      }),
+      daily: daysInPeriod,
       topKeys: topKeys.map(({ id, label, requests, errors }) => ({ id: String(id), label, requests, errors })),
+      ...(usage ? { usage: usageMetadata(usage, daysInPeriod) } : {}),
     })
   }
 
@@ -212,6 +258,28 @@ export function createWebAdminHandler({ repository, catalogEditor, passwordHash,
     throw new HttpError(405, 'Метод запроса недоступен.')
   }
 
+  async function fieldLabels(request, response, path, query) {
+    if (path === '/api/field-labels') {
+      if (request.method !== 'GET') throw new HttpError(405, 'Метод запроса недоступен.')
+      const { q = '', page = '1' } = readFilters(query, ['q', 'page'])
+      if (!/^[1-9][0-9]{0,8}$/.test(page)) throw invalidFilter()
+      return json(response, 200, await fieldLabelEditor.list({ query: q, page: Number(page) }))
+    }
+    const match = /^\/api\/field-labels\/([^/]+)$/.exec(path)
+    if (!match) throw new HttpError(404, 'Страница не найдена.')
+    if (request.method !== 'POST') throw new HttpError(405, 'Метод запроса недоступен.')
+    readFilters(query, [])
+    let key
+    try { key = decodeURIComponent(match[1]) }
+    catch { throw invalidBody() }
+    const { label } = await readJson(request, 'label')
+    const row = await fieldLabelEditor.update(key, label).catch(error => {
+      if (error?.code === 5) throw new HttpError(404, 'Поле поиска не найдено.')
+      throw error
+    })
+    return json(response, 200, { row })
+  }
+
   return async function handle(request, response) {
     for (const [name, value] of Object.entries(headers)) response.setHeader(name, value)
     try {
@@ -231,11 +299,13 @@ export function createWebAdminHandler({ repository, catalogEditor, passwordHash,
       }
       if (path === '/api/session') return await session(request, response)
       const catalogPath = path === '/api/catalog' || path.startsWith('/api/catalog/')
-      if (!catalogPath && path !== '/api/keys' && !path.startsWith('/api/keys/') && path !== '/api/logs' && path !== '/api/analytics') {
+      const fieldLabelsPath = path === '/api/field-labels' || path.startsWith('/api/field-labels/')
+      if (!catalogPath && !fieldLabelsPath && path !== '/api/keys' && !path.startsWith('/api/keys/') && path !== '/api/logs' && path !== '/api/analytics') {
         throw new HttpError(404, 'Страница не найдена.')
       }
       if (!sessions.authenticated(request.headers.cookie)) throw new HttpError(401, 'Войдите в веб-админку.')
       if (catalogPath) return await catalog(request, response, path, query)
+      if (fieldLabelsPath) return await fieldLabels(request, response, path, query)
       if (path === '/api/analytics' || path === '/api/logs') {
         if (method !== 'GET') throw new HttpError(405, 'Метод запроса недоступен.')
         return path === '/api/analytics' ? await analytics(response, query) : await logPage(response, query)

@@ -20,7 +20,8 @@ export class RecordsService {
   }
 
   capabilities() {
-    return { available: true, list: true, upload: true, download: true, remove: true, create: true, update: true, delete: true, message: '' }
+    return { available: true, list: true, upload: true, download: true, remove: true,
+      create: true, update: true, delete: true, column_filters: true, message: '' }
   }
 
   async upload(call) {

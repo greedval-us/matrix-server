@@ -24,7 +24,7 @@ export function readSettings(environment = process.env) {
   if (!['shared', 'device'].includes(authMode)) throw new Error('MATRIX_AUTH_MODE must be shared or device')
   const apiKey = secret(environment, 'MATRIX_API_KEY')
   if (authMode === 'shared' && !apiKey) throw new Error('MATRIX_API_KEY must be configured')
-  const moduleIds = String(environment.MATRIX_MODULES ?? 'search,catalog').split(',').map(value => value.trim()).filter(Boolean)
+  const moduleIds = String(environment.MATRIX_MODULES ?? 'search,catalog,releases').split(',').map(value => value.trim()).filter(Boolean)
   if (!moduleIds.length || new Set(moduleIds).size !== moduleIds.length || moduleIds.some(id => !modules.some(module => module.id === id))) throw new Error('MATRIX_MODULES contains an unknown or duplicate module')
   const mysql = environment.MATRIX_MYSQL_HOST ? readMysqlSettings(environment) : null
   if (authMode === 'device' && !mysql) throw new Error('Device authorization requires operational MySQL')
@@ -41,6 +41,7 @@ export function readSettings(environment = process.env) {
     grpcPort: positiveInteger(environment, 'MATRIX_GRPC_PORT', 50051, 65535),
     apiKey, adminApiKey, authMode, moduleIds: Object.freeze(moduleIds), mysql,
     recordsFileDirectory: path.resolve(environment.MATRIX_RECORDS_FILE_DIR ?? 'data/files'),
+    releasesDirectory: path.resolve(environment.MATRIX_RELEASES_DIR ?? 'data/releases'),
     manticoreUrl: String(environment.MANTICORE_URL ?? 'http://127.0.0.1:9308').replace(/\/+$/, ''),
     manticoreTable: environment.MANTICORE_TABLE ?? 'matrix_records',
     indexStatePath: path.resolve(environment.MANTICORE_INDEX_STATE ?? 'data/state/indexer.json'),

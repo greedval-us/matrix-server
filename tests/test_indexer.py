@@ -24,6 +24,13 @@ def load_indexer():
 
 
 class ImportTests(unittest.TestCase):
+    def test_search_configuration_leaves_raw_query_logging_disabled(self):
+        with patch.dict(os.environ, {}, clear=True):
+            indexer = load_indexer()
+            config = indexer.build_active_config([], indexer.load_settings(bootstrap=True))
+        self.assertIn("searchd.log", config)
+        self.assertNotRegex(config, r"(?m)^\s*query_log\s*=")
+
     def test_import_does_not_require_linux_lock_module(self):
         with patch.dict(sys.modules, {"fcntl": None}):
             self.assertTrue(callable(load_indexer().main))

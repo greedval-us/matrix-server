@@ -2,6 +2,7 @@ import grpc from '@grpc/grpc-js'
 
 export const APPLICATION_ERROR_CODES = Object.freeze({
   INVALID_ARGUMENT: grpc.status.INVALID_ARGUMENT,
+  FAILED_PRECONDITION: grpc.status.FAILED_PRECONDITION,
   RESOURCE_EXHAUSTED: grpc.status.RESOURCE_EXHAUSTED,
   UNAVAILABLE: grpc.status.UNAVAILABLE,
 })

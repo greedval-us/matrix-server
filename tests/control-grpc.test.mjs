@@ -42,13 +42,20 @@ async function fixture(t) {
 }
 
 test('control module advertises and authorizes CRUD for the current client key', async t => {
-  const { unary } = await fixture(t)
+  const { unary, controlRepository } = await fixture(t)
   assert.equal((await unary('getCapabilities', {})).upload, true)
   const capabilities = await unary('getCapabilities', {})
   assert.equal(capabilities.create, true)
   assert.equal(capabilities.update, true)
   assert.equal(capabilities.delete, true)
+  assert.equal(capabilities.column_filters, true)
   assert.equal((await unary('listRecords', { page: 1, page_size: 25 })).rows[0].values.fio, 'Имя 1')
+  const list = controlRepository.list
+  controlRepository.list = request => {
+    assert.deepEqual(request.filters, { initiator: 'Отдел', location: 'В РФ' })
+    return list()
+  }
+  await unary('listRecords', { query: 'Имя', filters: { initiator: 'Отдел', location: 'В РФ' } })
   await assert.rejects(unary('createRecord', { values: { fio: 'Новая запись' } }, 'invalid'), { code: grpc.status.UNAUTHENTICATED })
   const record = await unary('createRecord', { values: { fio: 'Новая запись' } })
   assert.equal(record.id, '3')

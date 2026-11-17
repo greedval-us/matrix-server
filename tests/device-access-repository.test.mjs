@@ -3,11 +3,17 @@ import { createHash, randomBytes } from 'node:crypto'
 import test from 'node:test'
 import { DeviceAccessRepository } from '../node/infrastructure/mysql/device-access.mjs'
 import { OperationalRepository } from '../node/infrastructure/mysql/repository.mjs'
+import { SEARCH_FIELDS } from '../node/modules/search/normalization.mjs'
 
 const claim = {
   keyDigest: randomBytes(32), deviceKey: randomBytes(44), nonce: randomBytes(16),
   now: 1_800_000_000_000, expiresAt: 1_800_000_120_000,
 }
+
+const emptySearchUsage = [{
+  searchRequests: '0', withMatches: '0', withoutMatches: '0', knownFields: '0',
+  averageMs: null, p95SuccessMs: null, field: null,
+}]
 
 function poolWithResponses(responses) {
   const actions = []
@@ -125,21 +131,30 @@ test('analytics converts aggregate values while preserving bigint key IDs', asyn
   const id = '18446744073709551615'
   const from = '2026-11-11 00:00:00'
   const { actions, pool } = poolWithResponses([
-    [{ total: '4', bound: '2', pending: '1', revoked: '1' }],
-    [{ requests: '3', errors: '1', activeKeys: '1', averageMs: '12.5000' }],
-    [{ day: '2026-11-11', requests: '3', errors: '1' }],
+    [{ total: '4', bound: '2', pending: '1', revoked: '1', ownerCount: '3' }],
+    [{ requests: '3', errors: '1', successes: '2', cancelled: '0', checks: '0', activeOwners: '1',
+      activeKeys: '1', averageMs: '12.5000', lastActivity: '2026-11-11 10:00:00.123' }],
+    [{ day: '2026-11-11', requests: '3', errors: '1', successes: '2', cancelled: '0', checks: '0' }],
     [{ id, label: 'Operator', requests: '3', errors: '1' }],
+    [], [], [], emptySearchUsage,
   ])
-  assert.deepEqual(await new DeviceAccessRepository(pool).analytics(from), {
+  const { usage, ...legacy } = await new DeviceAccessRepository(pool).analytics(from)
+  assert.deepEqual(legacy, {
     keys: { total: 4, bound: 2, pending: 1, revoked: 1 },
     totals: { requests: 3, errors: 1, activeKeys: 1, averageMs: 12.5 },
     daily: [{ day: '2026-11-11', requests: 3, errors: 1 }],
     topKeys: [{ id, label: 'Operator', requests: 3, errors: 1 }],
   })
-  assert.deepEqual(actions.map(action => action.params), [[], [from], [from], [from]])
+  assert.equal(usage.actions, 3)
+  assert.equal(usage.ownerCount, 3)
+  assert.deepEqual(usage.search, {
+    requests: 0, withMatches: 0, withoutMatches: 0, unknown: 0, knownFields: 0,
+    averageMs: null, p95SuccessMs: null, fields: [],
+  })
+  assert.deepEqual(actions.map(action => action.params), [[], [from], [from], [from], [from], [from], [from], [from, ...SEARCH_FIELDS]])
   for (const { sql } of actions.slice(1)) {
-    assert.match(sql, /WHERE `created_at` >= \?/)
-    assert.match(sql, /`status_code` NOT IN \(0, 1\)/)
+    assert.match(sql, /WHERE l\.`created_at` >= \?/)
+    if (!sql.includes('filtered_logs') && !sql.includes('filtered_searches')) assert.match(sql, /`status_code` NOT IN \(0, 1\)/)
     assert.doesNotMatch(sql, /key_digest|device_key|nonce/)
   }
 })
@@ -148,20 +163,76 @@ test('owner analytics binds an exact label across all aggregates before ranking 
   const owner = "Оператор О'Нил"
   const from = '2026-11-11 00:00:00'
   const { actions, pool } = poolWithResponses([
-    [{ total: '3', bound: '1', pending: '1', revoked: '1' }],
-    [{ requests: '3', errors: '1', activeKeys: '2', averageMs: '4.0000' }],
-    [{ day: '2026-11-11', requests: '3', errors: '1' }],
+    [{ total: '3', bound: '1', pending: '1', revoked: '1', ownerCount: '1' }],
+    [{ requests: '3', errors: '1', successes: '2', cancelled: '0', checks: '1', activeOwners: '1',
+      activeKeys: '2', averageMs: '4.0000', lastActivity: '2026-11-11 10:00:00.123' }],
+    [{ day: '2026-11-11', requests: '3', errors: '1', successes: '2', cancelled: '0', checks: '1' }],
     [{ id: '8', label: owner, requests: '2', errors: '1' }, { id: '9', label: owner, requests: '1', errors: '0' }],
+    [], [], [], emptySearchUsage,
   ])
   const stats = await new DeviceAccessRepository(pool).analytics(from, owner)
   assert.deepEqual(stats.keys, { total: 3, bound: 1, pending: 1, revoked: 1 })
   assert.deepEqual(stats.totals, { requests: 3, errors: 1, activeKeys: 2, averageMs: 4 })
   assert.deepEqual(stats.topKeys.map(key => key.id), ['8', '9'])
-  assert.deepEqual(actions.map(action => action.params), [[owner], [from, owner], [from, owner], [from, owner]])
+  assert.deepEqual(actions.map(action => action.params), [[owner], [from, owner], [from, owner], [from, owner], [from, owner, owner], [from, owner], [from, owner], [from, owner, ...SEARCH_FIELDS]])
   for (const { sql } of actions) {
-    assert.match(sql, /CAST\(`label` AS BINARY\) = CAST\(\? AS BINARY\)/)
+    assert.match(sql, /CAST\(k\.`label` AS BINARY\) = CAST\(\? AS BINARY\)/)
     assert.ok(!sql.includes(owner))
   }
-  for (const { sql } of actions.slice(1)) assert.match(sql, /`access_key_id` IN \(SELECT `id` FROM `access_keys` WHERE/)
-  assert.match(actions[3].sql, /CAST\(\? AS BINARY\)\)\s+GROUP BY `access_key_id`/)
+  for (const { sql } of actions.slice(1)) assert.match(sql, /l\.`access_key_id` IN \(SELECT k\.`id` FROM `access_keys` k WHERE/)
+  assert.match(actions[3].sql, /CAST\(\? AS BINARY\)\)\s+GROUP BY l\.`access_key_id`/)
+})
+
+test('analytics distinguishes owner actions from checks and maps latency and outcome summaries', async () => {
+  const owner = 'Оператор'
+  const from = '2026-11-11 00:00:00'
+  const lastActivity = '2026-11-11 08:00:00.123'
+  const metrics = { requests: '4', successes: '2', errors: '1', cancelled: '1', checks: '1' }
+  const keys = { total: '3', bound: '2', pending: '0', revoked: '1' }
+  const search = { searchRequests: '1', withMatches: '0', withoutMatches: '0' }
+  const { actions, pool } = poolWithResponses([
+    [{ ...keys, ownerCount: '1' }], [{ ...metrics, activeKeys: '2', activeOwners: '1', averageMs: '5.5000', lastActivity }],
+    [{ ...metrics, day: '2026-11-11' }], [],
+    [{ ...keys, ...metrics, ...search, label: owner, activeKeys: '2', averageMs: '5.5', lastActivity }],
+    [{ ...metrics, module: 'search', method: 'StreamSearch', averageMs: '6.5', p95SuccessMs: '10', lastActivity },
+      { requests: '1', successes: '0', errors: '1', cancelled: '0', module: 'records', method: 'GetCapabilities',
+        averageMs: '1', p95SuccessMs: null, lastActivity }],
+    [{ code: '14', requests: '1' }],
+    [{ ...search, knownFields: '1', averageMs: '18.5', p95SuccessMs: null, field: 'number', fieldRequests: '1' }],
+  ])
+  const { usage } = await new DeviceAccessRepository(pool).analytics(from, owner, 'error')
+  assert.deepEqual([usage.actions, usage.checks, usage.activeOwners, usage.lastActivity], [3, 1, 1, lastActivity])
+  assert.deepEqual(usage.daily[0], { day: '2026-11-11', requests: 4, successes: 2, errors: 1, cancelled: 1, actions: 3, checks: 1 })
+  assert.deepEqual(usage.owners[0].keys, { total: 3, bound: 2, pending: 0, revoked: 1 })
+  assert.equal(usage.owners[0].actions, 3)
+  const counts = { requests: 1, withMatches: 0, withoutMatches: 0, unknown: 1 }
+  assert.deepEqual(usage.owners[0].search, counts)
+  assert.deepEqual(usage.search, {
+    ...counts, knownFields: 1, averageMs: 18.5, p95SuccessMs: null, fields: [{ field: 'number', requests: 1 }],
+  })
+  assert.deepEqual(usage.operations.map(({ background, p95SuccessMs }) => [background, p95SuccessMs]), [[false, 10], [true, null]])
+  assert.deepEqual(usage.errorCodes, [{ code: 14, requests: 1 }])
+  assert.deepEqual(actions.map(({ params }) => params), [[owner], [from, owner], [from, owner], [from, owner], [from, owner, owner], [from, owner], [from, owner], [from, owner, ...SEARCH_FIELDS]])
+  for (const { sql } of actions.slice(1)) assert.match(sql, /AND l\.`status_code` NOT IN \(0, 1\)/)
+  for (const { sql } of actions) assert.doesNotMatch(sql, /key_digest|device_key|nonce/)
+  assert.match(actions.at(-1).sql, /l\.`method` = 'StreamSearch'/)
+  assert.match(actions.at(-1).sql, /JSON_CONTAINS\(s\.`search_fields`, JSON_QUOTE\(f\.`field`\)\)/)
+})
+
+test('search audit persists only canonical fields and Boolean results for personal searches', async () => {
+  const { actions, pool } = poolWithResponses([{}, {}, {}, {}])
+  const repository = new OperationalRepository(pool)
+  const search = { module: 'search', method: 'StreamSearch', accessKeyId: '12', durationMs: 8 }
+  await repository.appendLog({ ...search, statusCode: 0, searchFields: ['mail', 'raw-private-sample', 'number', 'mail'], searchHadMatches: false })
+  await repository.appendLog({ ...search, statusCode: 1, searchFields: ['number'], searchHadMatches: true })
+  await repository.appendLog({ ...search, statusCode: 0, searchFields: ['no-such-field'], searchHadMatches: true })
+  await repository.appendLog({ ...search, accessKeyId: undefined, statusCode: 0, searchFields: ['number'], searchHadMatches: true })
+  assert.deepEqual(actions.map(({ params }) => params), [
+    ['12', 'search', 'StreamSearch', 0, 8, '["number","mail"]', 0],
+    ['12', 'search', 'StreamSearch', 1, 8, '["number"]', null],
+    ['12', 'search', 'StreamSearch', 0, 8],
+    ['search', 'StreamSearch', 0, 8],
+  ])
+  assert.match(actions[0].sql, /`search_fields`, `search_had_matches`/)
+  assert.doesNotMatch(JSON.stringify(actions), /raw-private-sample|no-such-field/)
 })

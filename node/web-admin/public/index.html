@@ -33,8 +33,10 @@
 
     <section id="dashboard" aria-labelledby="page-title" hidden>
       <nav class="dashboard-nav" aria-label="Разделы админки">
-        <button id="show-access" type="button" aria-pressed="true">Ключи и аналитика</button>
+        <button id="show-access" type="button" aria-pressed="true">Ключи и журнал</button>
+        <button id="show-analytics" type="button" aria-pressed="false" aria-controls="analytics-view">Аналитика</button>
         <button id="show-catalog" type="button" aria-pressed="false" aria-controls="catalog-view">Каталог баз</button>
+        <button id="show-field-labels" type="button" aria-pressed="false" aria-controls="field-labels-view">Поля поиска</button>
       </nav>
       <div class="page-heading">
         <h1 id="page-title" tabindex="-1">Управление доступом</h1>
@@ -42,14 +44,17 @@
           <button class="button" id="refresh" type="button">Обновить</button>
           <button class="button primary" id="open-issue" type="button">Выпустить ключ</button>
         </div>
+        <div class="actions" data-dashboard-view="analytics" hidden>
+          <button class="button" id="analytics-refresh" type="button">Обновить</button>
+          <button class="button" id="analytics-export" type="button" disabled>Скачать CSV</button>
+        </div>
       </div>
       <div data-dashboard-view="access">
         <p class="notice" id="dashboard-notice" role="status" hidden></p>
       </div>
 
-      <section class="panel overview" aria-labelledby="analytics-title" data-dashboard-view="access">
-        <div class="panel-heading analytics-heading">
-          <h2 id="analytics-title">Аналитика</h2>
+      <section id="analytics-view" data-dashboard-view="analytics" aria-labelledby="page-title" hidden>
+        <div class="panel analytics-overview">
           <div class="analytics-filters">
             <label>
               <span>Владелец</span>
@@ -58,35 +63,115 @@
               </select>
             </label>
             <label>
-              <span>Период аналитики</span>
+              <span>Период, UTC</span>
               <select id="analytics-days">
-                <option value="1">Сегодня (UTC)</option>
+                <option value="1">Сегодня</option>
                 <option value="7" selected>7 дней</option>
                 <option value="30">30 дней</option>
               </select>
             </label>
+            <label>
+              <span>Результат операции</span>
+              <select id="analytics-result">
+                <option value="all">Все результаты</option>
+                <option value="success">Успешные</option>
+                <option value="error">Ошибки</option>
+                <option value="cancelled">Отменённые</option>
+              </select>
+            </label>
           </div>
-        </div>
-        <p class="panel-message muted" id="analytics-message" role="status">Загружаем аналитику…</p>
-        <div id="analytics-content" hidden>
-          <dl class="metrics">
-            <div><dt>Запросы</dt><dd id="metric-requests"></dd></div>
-            <div><dt>Ошибки</dt><dd id="metric-errors"></dd></div>
-            <div><dt>Ключи с запросами</dt><dd id="metric-active"></dd></div>
-            <div><dt>Среднее время</dt><dd id="metric-duration"></dd></div>
+          <p class="panel-message muted" id="analytics-message" role="status" hidden></p>
+          <dl class="metrics" id="analytics-metrics" hidden>
+            <div><dt>Операции</dt><dd id="metric-actions"></dd><p class="analytics-meta" id="metric-checks"></p></div>
+            <div><dt>Активные владельцы</dt><dd id="metric-active"></dd></div>
+            <div><dt>Ошибки запросов</dt><dd id="metric-errors"></dd></div>
+            <div><dt>Отмены</dt><dd id="metric-cancelled"></dd></div>
           </dl>
+        </div>
+        <div class="analytics-content" id="analytics-content" hidden>
+          <section class="panel" aria-labelledby="owners-title">
+            <div class="panel-heading analytics-heading">
+              <h2 id="owners-title">Активность владельцев</h2>
+              <span class="muted analytics-meta" id="analytics-owner-count"></span>
+            </div>
+            <p class="analytics-note muted">Ключи с одинаковым именем относятся к одному владельцу.</p>
+            <p class="panel-message muted" id="analytics-owners-empty" hidden>Владельцы не найдены.</p>
+            <div class="analytics-table" id="analytics-owners-table" role="region" aria-labelledby="owners-title" tabindex="0">
+              <table>
+                <thead><tr>
+                  <th scope="col">Владелец</th><th scope="col">Ключи</th><th scope="col">Операции</th><th scope="col">Поиски</th>
+                  <th scope="col">Ошибки</th><th scope="col">Отмены</th><th scope="col">Последний запрос</th>
+                </tr></thead>
+                <tbody id="analytics-owner-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel" id="analytics-search-panel" aria-labelledby="analytics-search-title" hidden>
+            <div class="panel-heading analytics-heading">
+              <h2 id="analytics-search-title">Статистика поиска</h2>
+              <span class="analytics-meta" id="analytics-search-owner"></span>
+            </div>
+            <p class="panel-message muted" id="analytics-search-empty" hidden>По заданным фильтрам поисков нет.</p>
+            <div id="analytics-search-content" hidden>
+              <dl class="metrics search-metrics">
+                <div><dt>Поисковые запросы</dt><dd id="search-metric-requests"></dd></div>
+                <div><dt>Без совпадений</dt><dd id="search-metric-empty"></dd><p class="analytics-meta" id="search-metric-outcomes"></p></div>
+                <div><dt>Среднее время</dt><dd id="search-metric-average"></dd></div>
+                <div><dt>p95 успешных поисков</dt><dd id="search-metric-p95"></dd></div>
+              </dl>
+              <div class="analytics-section">
+                <h3 id="analytics-search-fields-title">Частота использования полей</h3>
+                <p class="analytics-meta" id="analytics-search-coverage"></p>
+                <div class="analytics-table search-field-table" id="analytics-search-fields" role="region"
+                  aria-labelledby="analytics-search-fields-title" tabindex="0" hidden>
+                  <table>
+                    <thead><tr><th scope="col">Поле</th><th scope="col">Запросы</th><th scope="col">Доля</th></tr></thead>
+                    <tbody id="analytics-search-field-rows"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="operations-title">
+            <div class="panel-heading analytics-heading">
+              <h2 id="operations-title">Использование и скорость</h2>
+              <label class="analytics-sort">Сортировка
+                <select id="analytics-sort">
+                  <option value="requests">По числу запросов</option>
+                  <option value="errors">По числу ошибок</option>
+                  <option value="p95SuccessMs">По времени p95</option>
+                </select>
+              </label>
+            </div>
+            <p class="analytics-note muted">p95 показывает, за какое время завершились 95% успешных запросов. Время включает передачу результатов.</p>
+            <p class="panel-message muted" id="analytics-operations-empty" hidden>За выбранный период запросов нет.</p>
+            <div class="analytics-table" id="analytics-operations-table" role="region" aria-labelledby="operations-title" tabindex="0">
+              <table>
+                <thead><tr>
+                  <th scope="col">Операция</th><th scope="col">Запросы</th><th scope="col">Успешно</th>
+                  <th scope="col">Ошибки</th><th scope="col">Отмены</th><th scope="col">p95</th>
+                </tr></thead>
+                <tbody id="analytics-operation-rows"></tbody>
+              </table>
+            </div>
+          </section>
           <div class="analytics-detail">
-            <section class="analytics-section" aria-labelledby="daily-title">
-              <h3 id="daily-title">Запросы по дням <span class="muted chart-unit">UTC</span></h3>
-              <div class="daily-scroll" role="region" aria-label="Запросы по дням" tabindex="0">
+            <section class="panel analytics-section" aria-labelledby="daily-title">
+              <h3 id="daily-title">Активность по дням <span class="muted chart-unit">UTC</span></h3>
+              <div class="daily-scroll" role="region" aria-labelledby="daily-title" tabindex="0">
                 <table class="daily-table">
-                  <thead><tr><th scope="col">Дата</th><th scope="col">Запросы</th><th scope="col">Ошибки</th></tr></thead>
+                  <thead><tr><th scope="col">Дата</th><th scope="col">Операции</th><th scope="col">Проверки</th><th scope="col">Ошибки</th></tr></thead>
                   <tbody id="daily-rows"></tbody>
                 </table>
               </div>
             </section>
-            <section class="analytics-section" aria-labelledby="top-keys-title">
-              <h3 id="top-keys-title">Ключи по числу запросов</h3>
+            <section class="panel analytics-section" aria-labelledby="error-codes-title">
+              <h3 id="error-codes-title">Причины ошибок</h3>
+              <p class="muted analytics-empty" id="analytics-errors-empty" hidden>Ошибок нет.</p>
+              <dl class="analytics-errors" id="analytics-error-codes"></dl>
+            </section>
+            <section class="panel analytics-section" aria-labelledby="top-keys-title">
+              <h3 id="top-keys-title">Запросы по ключам</h3>
               <p class="muted analytics-empty" id="top-keys-empty" hidden>За выбранный период запросов нет.</p>
               <ul class="top-keys" id="top-keys"></ul>
             </section>
@@ -218,8 +303,54 @@
           </div>
         </div>
       </section>
+      <section class="panel" id="field-labels-view" data-dashboard-view="field-labels" aria-labelledby="page-title" hidden>
+        <div class="catalog-toolbar">
+          <form class="catalog-search-form" id="field-label-search-form" role="search" aria-label="Поиск поля">
+            <label class="sr-only" for="field-label-search">Технический ключ или подпись</label>
+            <input id="field-label-search" type="search" placeholder="Технический ключ или подпись" autocomplete="off">
+            <button class="button" type="submit">Найти</button>
+          </form>
+        </div>
+        <p class="notice catalog-notice" id="field-label-notice" role="status" hidden></p>
+        <p class="panel-message muted" id="field-label-message" role="status" hidden></p>
+        <div class="catalog-table" id="field-label-table" role="region" aria-label="Поля поиска" tabindex="0" hidden>
+          <table>
+            <thead><tr>
+              <th scope="col">Подпись в результатах</th>
+              <th class="field-label-key" scope="col">Технический ключ</th>
+              <th class="catalog-action" scope="col"><span class="sr-only">Действия</span></th>
+            </tr></thead>
+            <tbody id="field-label-rows"></tbody>
+          </table>
+        </div>
+        <div class="journal-footer" id="field-label-pagination" hidden>
+          <span class="muted" id="field-label-count" role="status"></span>
+          <div class="actions">
+            <button class="button" id="field-label-prev" type="button">Назад</button>
+            <button class="button" id="field-label-next" type="button">Далее</button>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
+
+  <dialog id="field-label-dialog" aria-labelledby="field-label-dialog-title">
+    <div class="dialog-body">
+      <h2 id="field-label-dialog-title">Изменить подпись поля</h2>
+      <form class="stack" id="field-label-form">
+        <dl class="facts catalog-identity">
+          <div><dt>Технический ключ</dt><dd id="field-label-edit-key"></dd></div>
+        </dl>
+        <label for="field-label-value">Подпись в результатах</label>
+        <input id="field-label-value" name="label" type="text" autocomplete="off" required>
+        <p class="notice" id="field-label-edit-message" role="status" hidden></p>
+        <div class="dialog-actions">
+          <button class="button" id="field-label-cancel" type="button">Отмена</button>
+          <button class="button primary" type="submit">Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
 
   <dialog class="catalog-dialog" id="catalog-edit-dialog" aria-labelledby="catalog-edit-title">
     <div class="dialog-body">

@@ -1,0 +1,27 @@
+syntax = "proto3";
+package matrix.releases.v1;
+
+service Releases {
+  rpc GetLatest(ReleaseTarget) returns (Release);
+  rpc Download(DownloadRequest) returns (stream DownloadChunk);
+}
+message ReleaseTarget { string platform = 1; string arch = 2; string kind = 3; }
+message Release {
+  string version = 1;
+  string platform = 2;
+  string arch = 3;
+  string name = 4;
+  uint64 size = 5;
+  string sha256 = 6;
+  string published_at = 7;
+  string kind = 8;
+  string notes = 9;
+}
+message DownloadRequest {
+  string platform = 1;
+  string arch = 2;
+  string version = 3;
+  string sha256 = 4;
+  string kind = 5;
+}
+message DownloadChunk { oneof chunk { Release release = 1; bytes data = 2; } }

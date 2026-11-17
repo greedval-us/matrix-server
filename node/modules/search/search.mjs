@@ -4,6 +4,7 @@ import { decodeDocumentId, parseStoredFields } from './documents.mjs'
 import { readIndexStatus } from './index-state.mjs'
 import { ManticoreClient, ManticoreError } from './manticore.mjs'
 import { InvalidSearchQuery, SEARCH_FIELDS, buildManticoreQuery } from './normalization.mjs'
+import { readPrefixShards as readPublishedPrefixShards } from './prefix-shards.mjs'
 
 const MAX_SEARCH_PAGE_SIZE = 10_000
 const MAX_SEARCH_SUGGESTIONS = 50
@@ -36,13 +37,15 @@ export class SearchCapacity {
 
 export class SearchService {
   constructor(settings, { manticore, readCatalog = readDatabaseCatalog, readStatus = readIndexStatus,
-    readSourceMetadata, readFieldLabels } = {}) {
+    readSourceMetadata, readFieldLabels, readPrefixShards = readPublishedPrefixShards } = {}) {
     this.settings = settings
     this.readCatalog = readCatalog
     this.readStatus = readStatus
+    this.readPrefixShards = readPrefixShards
     this.readSourceMetadata = readSourceMetadata
     this.readFieldLabels = readFieldLabels
     this.capacity = new SearchCapacity(settings.maxConcurrentSearches)
+    this.broadCapacity = new SearchCapacity(1)
     this.manticore = manticore ?? new ManticoreClient({
       baseUrl: settings.manticoreUrl,
       table: settings.manticoreTable,
@@ -50,18 +53,22 @@ export class SearchService {
     })
   }
 
-  async *search(request, { signal } = {}) {
+  async *search(request, { signal, onSearchFields, onSearchComplete } = {}) {
     if (signal?.aborted) return
     try {
       const values = Object.fromEntries(
         SEARCH_FIELDS.filter(field => request[field]).map(field => [field, request[field]]),
       )
+      onSearchFields?.(Object.keys(values))
       const { expression, normalized } = buildManticoreQuery(values)
+      const broad = normalized.some(query => query.field === 'number' && /^[0-9]{4,5}%$/.test(query.pattern))
+      const sharded = broad && this.settings.manticoreTable === 'matrix_records'
+      if (broad && !request.supports_large_results) {
+        throw new ApplicationError(APPLICATION_ERROR_CODES.FAILED_PRECONDITION,
+          'Для поиска по 4–5 начальным цифрам откройте обычный поиск в новой версии Matrix')
+      }
       const requestedPageSize = Number.parseInt(request.limit ?? 0, 10) || this.settings.searchPageSize
       const pageSize = Math.min(Math.max(requestedPageSize, 1), MAX_SEARCH_PAGE_SIZE)
-      const status = await this.readStatus(this.settings.indexStatePath)
-      const catalog = await this.readCatalog(this.settings.databaseCatalogPath)
-      if (signal?.aborted) return
       const requested = new Map(normalized.map(query => [query.field, query.pattern.toLocaleLowerCase()]))
       const sentSources = new Set()
       const suggestions = new Map()
@@ -69,12 +76,22 @@ export class SearchService {
       let total = 0
       let tookMs = 0
       let firstPage = true
+      let complete = true
       let readSourceMetadata = this.readSourceMetadata
-      const release = this.capacity.acquire()
+      let status
+      const release = broad ? this.broadCapacity.acquire() : this.capacity.acquire()
       try {
-        for await (const response of this.manticore.searchAll(expression, pageSize, { signal })) {
+        const plan = sharded ? await this.readPrefixShards(this.settings.indexStatePath) : null
+        status = plan?.status ?? await this.readStatus(this.settings.indexStatePath)
+        const catalog = await this.readCatalog(this.settings.databaseCatalogPath)
+        if (signal?.aborted) return
+        const responses = plan
+          ? this.manticore.searchBroad(expression, pageSize, { signal, tables: plan.tables })
+          : this.manticore.searchAll(expression, pageSize, { signal })
+        for await (const response of responses) {
           if (signal?.aborted) return
-          if (firstPage) {
+          if (!sharded && response.complete !== true) complete = false
+          if (!sharded && firstPage) {
             total = response.total
             firstPage = false
           }
@@ -124,11 +141,13 @@ export class SearchService {
             yield { object_data: { source_name: sourceName, fields } }
             if (signal?.aborted) return
             returned += 1
+            if (suggestions.size >= MAX_SEARCH_SUGGESTIONS) continue
             for (const field of SEARCH_FIELDS) {
               const value = String(fields[field] || '').trim()
-              if (!value || suggestions.size >= MAX_SEARCH_SUGGESTIONS) continue
+              if (!value) continue
               if (value.toLocaleLowerCase() !== requested.get(field)) {
                 suggestions.set(`${field}\u0000${value}`, { key: field, value })
+                if (suggestions.size >= MAX_SEARCH_SUGGESTIONS) break
               }
             }
           }
@@ -140,10 +159,15 @@ export class SearchService {
       if (signal?.aborted) return
       yield {
         meta: {
-          total_hits: String(total), returned_hits: String(returned),
+          total_hits: String(sharded ? returned : total),
+          returned_hits: String(returned),
           indexed_shards: status.indexedShards, total_shards: status.totalShards,
           partial: status.partial, took_ms: tookMs,
         },
+      }
+      // Run only after the last frame has been accepted by the transport.
+      if (!signal?.aborted && status.partial === false && (sharded || (!firstPage && complete && total === returned))) {
+        onSearchComplete?.(returned > 0)
       }
     } catch (error) {
       if (signal?.aborted) return
