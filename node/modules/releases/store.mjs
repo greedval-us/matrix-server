@@ -34,7 +34,9 @@ export function validateNotes(value = '') {
 }
 
 export const targetKey = value => `${value.platform}/${value.arch}/${value.kind}`
-export const releaseName = value => `Matrix-${value.version}-${value.platform}-${value.arch}-${value.kind}.${value.kind === 'portable' ? 'exe' : 'AppImage'}`
+export const releaseName = value => `model 404.${value.kind === 'portable' ? 'exe' : 'AppImage'}`
+// Existing manifests keep their original public names, including cached download headers.
+const legacyReleaseName = value => `Matrix-${value.version}-${value.platform}-${value.arch}-${value.kind}.${value.kind === 'portable' ? 'exe' : 'AppImage'}`
 export const artifactName = value => `${value.version}-${value.platform}-${value.arch}-${value.kind}-${value.sha256}.bin`
 export function publicRelease({ file: _file, ...release }) { return release }
 
@@ -68,7 +70,7 @@ function validateEntry(value) {
   if (Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))
     || typeof value.size !== 'string' || !/^[1-9][0-9]{0,9}$/.test(value.size)
     || Number(value.size) > MAX_RELEASE_BYTES || !HASH.test(value.sha256)
-    || value.name !== releaseName(value) || value.file !== artifactName(value)
+    || (value.name !== releaseName(value) && value.name !== legacyReleaseName(value)) || value.file !== artifactName(value)
     || typeof value.published_at !== 'string' || !Number.isFinite(Date.parse(value.published_at))
     || new Date(value.published_at).toISOString() !== value.published_at) throw invalidStorage()
   return value

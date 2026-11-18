@@ -26,7 +26,7 @@ test('publisher computes metadata and streams a stable release in bounded chunks
   const f = await fixture(t, Buffer.alloc(600_123, 37))
   const release = await f.publish({ notes: 'Исправлен поиск' })
   assert.deepEqual(release, {
-    version: '1.2.3', ...target, name: 'Matrix-1.2.3-win32-x64-portable.exe',
+    version: '1.2.3', ...target, name: 'model 404.exe',
     size: '600123', sha256: createHash('sha256').update(f.content).digest('hex'),
     published_at: release.published_at, notes: 'Исправлен поиск',
   })
@@ -43,7 +43,8 @@ test('targets are isolated and publishing never replaces a version with differen
   const f = await fixture(t)
   const first = await f.publish()
   await assert.rejects(f.store.latest({ ...target, arch: 'arm64' }), { code: grpc.status.NOT_FOUND })
-  await f.publish({ platform: 'linux', arch: 'arm64', kind: 'appimage', version: '2.0.0' })
+  const linux = await f.publish({ platform: 'linux', arch: 'arm64', kind: 'appimage', version: '2.0.0' })
+  assert.equal(linux.name, 'model 404.AppImage')
   assert.deepEqual(await f.store.latest(target), first)
   await writeFile(f.file, 'replacement')
   await assert.rejects(f.publish(), { code: grpc.status.ALREADY_EXISTS })
@@ -51,6 +52,35 @@ test('targets are isolated and publishing never replaces a version with differen
   assert.deepEqual(await f.store.latest(target), first)
   await f.publish({ version: '1.3.0' })
   await assert.rejects(collect(f.store.download({ ...target, version: first.version, sha256: first.sha256 })), { code: grpc.status.NOT_FOUND })
+})
+
+test('legacy release names remain downloadable and unchanged while new publications use model 404', async t => {
+  const f = await fixture(t)
+  const linuxTarget = { platform: 'linux', arch: 'arm64', kind: 'appimage' }
+  await f.publish()
+  await f.publish(linuxTarget)
+  const manifestPath = path.join(f.directory, 'manifest.json')
+  const legacy = JSON.parse(await readFile(manifestPath, 'utf8'))
+  for (const entry of legacy.releases) {
+    entry.name = `Matrix-${entry.version}-${entry.platform}-${entry.arch}-${entry.kind}.${entry.kind === 'portable' ? 'exe' : 'AppImage'}`
+  }
+  await writeFile(manifestPath, JSON.stringify(legacy))
+  for (const { file, ...release } of legacy.releases) {
+    assert.deepEqual(await f.store.latest(release), release)
+    const frames = await collect(f.store.download(release))
+    assert.deepEqual(frames[0], { release })
+    assert.deepEqual(Buffer.concat(frames.slice(1).map(frame => frame.data)), f.content)
+    assert.deepEqual(await readFile(path.join(f.directory, file)), f.content)
+  }
+  const legacyWindows = await f.store.latest(target)
+  const legacyLinux = await f.store.latest(linuxTarget)
+  assert.deepEqual(await f.publish(), legacyWindows)
+  const arm64 = await f.publish({ arch: 'arm64' })
+  assert.equal(arm64.name, 'model 404.exe')
+  const mixed = JSON.parse(await readFile(manifestPath, 'utf8'))
+  assert.deepEqual(mixed.releases.slice(0, 2), legacy.releases)
+  assert.equal((await f.publish({ version: '1.2.4' })).name, 'model 404.exe')
+  assert.deepEqual(await f.store.latest(linuxTarget), legacyLinux)
 })
 
 test('missing releases are normal and unsafe selectors or unstable versions are rejected', async t => {
@@ -86,7 +116,8 @@ test('manifest paths, invalid hashes, excessive metadata and changed artifact si
   await f.publish()
   const manifestPath = path.join(f.directory, 'manifest.json')
   const original = JSON.parse(await readFile(manifestPath, 'utf8'))
-  for (const patch of [{ file: '../client.exe' }, { sha256: 'x'.repeat(64) }, { size: '2147483649' }, { name: '..\\escape.exe' }]) {
+  for (const patch of [{ file: '../client.exe' }, { sha256: 'x'.repeat(64) }, { size: '2147483649' },
+    { name: '..\\escape.exe' }, { name: 'model 404.AppImage' }, { name: 'Matrix-9.9.9-win32-x64-portable.exe' }]) {
     const changed = structuredClone(original)
     Object.assign(changed.releases[0], patch)
     await writeFile(manifestPath, JSON.stringify(changed))

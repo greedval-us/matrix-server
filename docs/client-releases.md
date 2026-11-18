@@ -13,6 +13,11 @@
 AppImage. Публикуйте файл, собранный для выбранной архитектуры: издатель проверяет
 целостность и метаданные, но не исполняет и не анализирует машинный код приложения.
 
+Новые публикации предлагают имя `model 404.exe` для Windows и `model 404.AppImage`
+для Linux. Версия и архитектура передаются отдельно в метаданных. Ранее
+опубликованные имена `Matrix-<версия>-<платформа>-<архитектура>-<формат>.*`
+продолжают работать и сохраняются до публикации следующей версии для этой цели.
+
 ## Настройка сервера
 
 В native-окружении задайте:
@@ -54,7 +59,7 @@ sudo install -d -o 1000 -g 1000 -m 0750 "$MATRIX_DATA_ROOT/client-releases"
 
 ```bash
 npm run release:publish -- \
-  --file /srv/matrix/upload/Matrix.exe \
+  --file "/srv/matrix/upload/model 404.exe" \
   --directory /var/lib/matrix/releases \
   --version 1.2.3 --platform win32 --arch x64 --kind portable \
   --notes "Исправления поиска и интерфейса"
@@ -74,7 +79,7 @@ Linux используйте `--platform linux --arch x64 --kind appimage` и п
 UPLOAD=/srv/matrix/upload
 matrix_compose --profile tools run --rm --no-deps \
   --volume "$UPLOAD:/upload:ro" release-publish \
-  --file /upload/Matrix.exe \
+  --file "/upload/model 404.exe" \
   --version 1.2.3 --platform win32 --arch x64 --kind portable \
   --notes "Исправления поиска и интерфейса"
 ```
