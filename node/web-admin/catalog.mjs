@@ -34,15 +34,26 @@ function searchFilter(query) {
   }
 }
 
-function editValues(changes) {
+export async function catalogValues(changes, repository, { create = false } = {}) {
   if (!changes || typeof changes !== 'object' || Array.isArray(changes)) throw invalid()
   const entries = Object.entries(changes)
   if (!entries.length) throw invalid()
+  if (create && (typeof changes.name !== 'string' || !changes.name.trim())) throw invalid()
   for (const [field, value] of entries) {
-    if (!CATALOG_EDIT_FIELDS.includes(field)) throw invalid()
+    if (!CATALOG_EDIT_FIELDS.includes(field) && !(create && field === 'access_level')) throw invalid()
     if (value === null) continue
     if (typeof value !== 'string' || !value.isWellFormed()) throw invalid()
     if (field === 'info' ? Buffer.byteLength(value) > 65535 : [...value].length > 255) throw invalid()
+  }
+  const type = entries.find(([field]) => field === 'type')
+  if (type && type[1] !== null) {
+    const name = normalizeCatalogTypeName(type[1])
+    if (name === null) throw invalid()
+    const [registered] = await repository.execute(
+      'SELECT `name` FROM `catalog_types` WHERE `name` = ? AND `alias_for` IS NULL', [name],
+    )
+    if (!registered) throw invalid()
+    type[1] = registered.name
   }
   return entries
 }
@@ -81,17 +92,7 @@ export function createCatalogEditor(repository) {
     get,
     async update(id, changes) {
       if (!validId(id)) throw invalid()
-      const entries = editValues(changes)
-      const type = entries.find(([field]) => field === 'type')
-      if (type && type[1] !== null) {
-        const name = normalizeCatalogTypeName(type[1])
-        if (name === null) throw invalid()
-        const [registered] = await repository.execute(
-          'SELECT `name` FROM `catalog_types` WHERE `name` = ? AND `alias_for` IS NULL', [name],
-        )
-        if (!registered) throw invalid()
-        type[1] = registered.name
-      }
+      const entries = await catalogValues(changes, repository)
       const assignments = entries.map(([field]) => `${column(field)} = ?`).join(', ')
       await repository.execute(`UPDATE \`data_base\` SET ${assignments} WHERE \`id\` = ?`, [...entries.map(([, value]) => value), id])
       return get(id)

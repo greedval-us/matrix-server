@@ -177,6 +177,13 @@ services:
       MATRIX_MYSQL_USER: ${MATRIX_WEB_ADMIN_DB_USER:-matrix_web_admin}
       MATRIX_MYSQL_PASSWORD_FILE: /run/matrix/admin/db-password
       MATRIX_MYSQL_CONNECTION_LIMIT: "4"
+      MATRIX_DATABASE_CATALOG: /var/lib/manticore/state/database-catalog.json
+      IMPORT_MYSQL_HOST: ${SOURCE_MYSQL_HOST:-}
+      IMPORT_MYSQL_PORT: ${SOURCE_MYSQL_PORT:-3306}
+      IMPORT_MYSQL_DATABASE: ${SOURCE_MYSQL_DATABASE:-source_data}
+      IMPORT_MYSQL_USER: ${MATRIX_WEB_ADMIN_IMPORT_USER:-}
+      IMPORT_MYSQL_PASSWORD_FILE: /run/matrix/admin/import/db-password
+      IMPORT_MYSQL_CONNECTION_LIMIT: "2"
       MATRIX_WEB_ADMIN_HOST: 0.0.0.0
       MATRIX_WEB_ADMIN_PORT: "8443"
       MATRIX_WEB_ADMIN_ALLOWED_CIDRS: ${MATRIX_WEB_ADMIN_ALLOWED_CIDRS:-}
@@ -186,6 +193,7 @@ services:
     ports:
       - "${MATRIX_WEB_ADMIN_BIND_HOST:-127.0.0.1}:${MATRIX_WEB_ADMIN_PUBLISHED_PORT:-8443}:8443"
     volumes:
+      - manticore-state:/var/lib/manticore/state:ro
       - type: bind
         source: ${MATRIX_WEB_ADMIN_SECRETS_DIR:-./deployment-config/web-admin}
         target: /run/matrix/admin
@@ -198,7 +206,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
-    networks: [backend, edge]
+    networks: [backend, edge, source]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -251,7 +259,7 @@ networks:
     internal: true
   # A gateway network is needed for Docker to publish the API's host port.
   edge: {}
-  # Only explicit indexer/catalogue-copy jobs can reach external source MariaDB.
+  # Source readers and the admin's separately configured import writer.
   source: {}
 
 volumes:

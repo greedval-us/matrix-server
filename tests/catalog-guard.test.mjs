@@ -24,3 +24,16 @@ test('published catalog identities cannot be deleted or reused by operational CR
     await assert.rejects(repo.delete('data_base', '8'), { code: 9 })
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
+
+test('an import can skip reserved IDs but cannot reuse a previously indexed table name', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'matrix-import-guard-'))
+  try {
+    const snapshot = path.join(directory, 'catalog.json')
+    await writeFile(snapshot, JSON.stringify({ databases: [{ id: 27, name_table: 'old' }, { id: 28, name_table: 'another' }] }))
+    const guard = createCatalogGuard(snapshot)
+    assert.equal(await guard({ id: '27', tableName: 'new', findAvailable: true }), '29')
+    await assert.rejects(guard({ id: '29', tableName: 'old', findAvailable: true }), { code: 9 })
+    await writeFile(snapshot, JSON.stringify({ databases: [{ id: 'bad', name_table: 'old' }] }))
+    await assert.rejects(guard({ id: '29', tableName: 'new', findAvailable: true }), { code: 9 })
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})

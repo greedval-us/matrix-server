@@ -7,8 +7,8 @@ function integer(env, name, fallback, maximum) {
 }
 
 export function readMysqlSettings(env = process.env, prefix = 'MATRIX_MYSQL') {
-  if (!['MATRIX_MYSQL', 'SOURCE_MYSQL'].includes(prefix)) throw new Error('Invalid MySQL environment prefix')
-  const source = prefix === 'SOURCE_MYSQL'
+  if (!['MATRIX_MYSQL', 'SOURCE_MYSQL', 'IMPORT_MYSQL'].includes(prefix)) throw new Error('Invalid MySQL environment prefix')
+  const source = prefix !== 'MATRIX_MYSQL'
   const user = (env[`${prefix}_USER`] ?? '').trim()
   const host = (env[`${prefix}_HOST`] ?? (source ? '' : '127.0.0.1')).trim()
   const database = (env[`${prefix}_DATABASE`] ?? (source ? 'source_data' : 'matrix')).trim()

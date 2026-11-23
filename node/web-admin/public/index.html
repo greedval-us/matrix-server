@@ -277,7 +277,10 @@
             <input id="catalog-search" type="search" placeholder="Название базы, таблица или ID" autocomplete="off">
             <button class="button" type="submit">Найти</button>
           </form>
-          <button class="button" id="catalog-types-open" type="button" aria-haspopup="dialog">Добавить тип</button>
+          <div class="actions">
+            <button class="button" id="catalog-types-open" type="button" aria-haspopup="dialog">Добавить тип</button>
+            <button class="button primary" id="catalog-create-open" type="button" aria-haspopup="dialog">Добавить базу</button>
+          </div>
         </div>
         <p class="notice catalog-notice" id="catalog-notice" role="status" hidden></p>
         <p class="panel-message muted" id="catalog-message" role="status" hidden></p>
@@ -359,7 +362,7 @@
         <p class="notice" id="catalog-edit-message" role="status" hidden></p>
         <fieldset class="catalog-edit-fields" id="catalog-edit-fields" hidden>
           <legend class="sr-only">Метаданные базы</legend>
-          <dl class="facts catalog-identity">
+          <dl class="facts catalog-identity" id="catalog-edit-identity">
             <div><dt>ID</dt><dd id="catalog-edit-id"></dd></div>
             <div><dt>Имя таблицы</dt><dd id="catalog-edit-table"></dd></div>
           </dl>
@@ -389,9 +392,23 @@
             <span>Достоверность</span>
             <input id="catalog-field-trust" name="trust" type="text" autocomplete="off">
           </label>
+          <label id="catalog-create-access" hidden>
+            <span>Уровень доступа</span>
+            <input name="access_level" type="text" autocomplete="off">
+          </label>
+        </fieldset>
+        <fieldset class="catalog-edit-fields" id="catalog-import-fields" hidden>
+          <legend class="sr-only">Выбор папки</legend>
+          <label class="catalog-wide">
+            <span>Выбрать папку с JSON-файлами</span>
+            <input id="catalog-import-folder" type="file" webkitdirectory multiple aria-describedby="catalog-import-hint catalog-import-selection">
+          </label>
+          <p class="catalog-wide muted" id="catalog-import-hint">Выберите папку с файлами .json. Подпапки тоже входят в загрузку. Каждый файл должен содержать объект или массив объектов, где хотя бы у одной записи есть поисковое поле, например <code>number</code> (телефон) или <code>mail</code> (почта).</p>
+          <p class="catalog-wide" id="catalog-import-selection" role="status"></p>
         </fieldset>
         <div class="dialog-actions">
           <button class="button" id="catalog-edit-cancel" type="button">Отмена</button>
+          <button class="button" id="catalog-import-back" type="button" hidden>Назад</button>
           <button class="button primary" id="catalog-edit-save" type="submit" hidden>Сохранить</button>
         </div>
       </form>

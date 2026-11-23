@@ -18,11 +18,14 @@ export function decodeDocumentId(value) {
 export function parseStoredFields(value) {
   let source
   try {
-    source = typeof value === 'string' ? JSON.parse(value) : value
+    // Imported JSON can contain numeric identifiers beyond JavaScript's exact
+    // integer range. Keep their source spelling even inside nested results.
+    source = typeof value === 'string' ? JSON.parse(value, (_key, field, context) =>
+      typeof field === 'number' ? JSON.rawJSON(context.source) : field) : value
   } catch (error) {
     throw new Error(`Manticore returned invalid row JSON: ${error.message}`)
   }
-  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+  if (!source || typeof source !== 'object' || Array.isArray(source) || JSON.isRawJSON(source)) {
     throw new Error('Manticore returned an invalid stored row')
   }
   return Object.fromEntries(Object.entries(source).map(([key, fieldValue]) => {

@@ -485,6 +485,25 @@ def search_expression(field: str, columns: list[dict]) -> str:
     )
 
 
+def row_expressions(table: str, columns: list[dict]) -> list[str]:
+    # MariaDB exposes its JSON alias as LONGTEXT in information_schema.
+    if (re.fullmatch(r"json_import_[0-9a-f]{32}", table)
+            and [(c["name"], c["data_type"].lower()) for c in columns] in (
+                [("id", "int"), ("matrix_json", "longtext")],
+                [("id", "int"), ("matrix_json", "json")],
+            )):
+        fields = []
+        for field in SEARCH_FIELDS:
+            value = f"JSON_EXTRACT(`matrix_json`, '$.{field}')"
+            fields.append(
+                f"CASE WHEN JSON_TYPE({value}) IN ('OBJECT','ARRAY','NULL') THEN '' "
+                f"ELSE IFNULL(JSON_UNQUOTE({value}),'') END AS {quote_identifier(field)}"
+            )
+        return [*fields, "`matrix_json` AS payload"]
+    return [*(search_expression(field, columns) for field in SEARCH_FIELDS),
+            f"{payload_expression(columns)} AS payload"]
+
+
 def table_settings(path: Path, sources: list[str] | None = None,
                    access_mode: str = "mmap_preread") -> str:
     lines = ["  type = plain"]
@@ -516,8 +535,7 @@ def build_indexer_config(index: int, shard: dict, plan: dict, settings: dict) ->
             f"CAST({segment['database_id']} * {1 << DOCUMENT_ID_SHIFT} + id AS UNSIGNED) AS id"
         )
         selected = [global_id]
-        selected.extend(search_expression(field, database["columns"]) for field in SEARCH_FIELDS)
-        selected.append(f"{payload_expression(database['columns'])} AS payload")
+        selected.extend(row_expressions(segment["table_name"], database["columns"]))
         query = (
             f"SELECT {','.join(selected)} FROM {table_name} "
             "WHERE id>=$start AND id<=$end"

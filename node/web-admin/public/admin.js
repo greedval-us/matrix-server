@@ -38,6 +38,11 @@ const catalogEditFields = byId('catalog-edit-fields');
 const catalogEditMessage = byId('catalog-edit-message');
 const catalogEditCancel = byId('catalog-edit-cancel');
 const catalogEditSave = byId('catalog-edit-save');
+const catalogEditTitle = byId('catalog-edit-title');
+const catalogImportFields = byId('catalog-import-fields');
+const catalogImportFolder = byId('catalog-import-folder');
+const catalogImportBack = byId('catalog-import-back');
+const catalogImportSelection = byId('catalog-import-selection');
 const catalogTypeSelect = byId('catalog-field-type');
 const catalogTypesDialog = byId('catalog-types-dialog');
 const catalogTypeForm = byId('catalog-type-form');
@@ -139,11 +144,13 @@ class ApiError extends Error {
   }
 }
 
-async function request(url, { method = 'GET', data, signal } = {}) {
+async function request(url, { method = 'GET', data, signal, importId } = {}) {
   const options = { method, signal, credentials: 'same-origin', cache: 'no-store' };
   if (method !== 'GET') {
-    options.headers = { 'Content-Type': 'application/json', 'X-Matrix-Admin': '1' };
-    if (data !== undefined) options.body = JSON.stringify(data);
+    const binary = data instanceof Blob;
+    options.headers = { 'Content-Type': binary ? data.type : 'application/json', 'X-Matrix-Admin': '1' };
+    if (importId) options.headers['X-Matrix-Import-Id'] = importId;
+    if (data !== undefined) options.body = binary ? data : JSON.stringify(data);
   }
   let response;
   try {
@@ -822,6 +829,10 @@ function resetCatalogEditor() {
   catalogEditForm.reset();
   setPending(catalogEditForm, false);
   catalogEditFields.hidden = true;
+  catalogImportFields.hidden = true;
+  catalogImportBack.hidden = true;
+  catalogImportSelection.textContent = '';
+  byId('catalog-field-name').required = false;
   catalogEditSave.hidden = true;
   byId('catalog-edit-id').textContent = '';
   byId('catalog-edit-table').textContent = '';
@@ -936,6 +947,12 @@ function renderCatalogTypeOptions(types, current) {
 
 async function openCatalogEditor(id) {
   resetCatalogEditor();
+  const create = id === undefined;
+  byId('catalog-edit-identity').hidden = create;
+  byId('catalog-create-access').hidden = !create;
+  byId('catalog-field-name').required = create;
+  catalogEditTitle.textContent = create ? 'Добавить базу · 1 из 2' : 'Редактировать базу';
+  catalogEditSave.textContent = create ? 'Далее' : 'Сохранить';
   const controller = new AbortController();
   catalogEditRequest = controller;
   message(catalogEditMessage, 'Загружаем метаданные…');
@@ -944,12 +961,12 @@ async function openCatalogEditor(id) {
   try {
     const options = { signal: controller.signal };
     const [{ row }, { types }] = await Promise.all([
-      authenticatedRequest('/api/catalog/' + encodeURIComponent(id), options),
+      create ? { row: {} } : authenticatedRequest('/api/catalog/' + encodeURIComponent(id), options),
       authenticatedRequest('/api/catalog/types', options),
     ]);
     if (controller.signal.aborted || !catalogEditDialog.open) return;
-    byId('catalog-edit-id').textContent = row.id;
-    byId('catalog-edit-table').textContent = row.name_table;
+    byId('catalog-edit-id').textContent = row.id ?? '';
+    byId('catalog-edit-table').textContent = row.name_table ?? '';
     renderCatalogTypeOptions(types, row.type);
     const values = {};
     for (const field of catalogFields) {
@@ -957,7 +974,7 @@ async function openCatalogEditor(id) {
       input.value = row[field] ?? '';
       values[field] = input.value;
     }
-    catalogDraft = { id, values };
+    catalogDraft = { id, values, create };
     catalogEditFields.hidden = false;
     catalogEditSave.hidden = false;
     message(catalogEditMessage);
@@ -1105,6 +1122,65 @@ catalogTypeForm.addEventListener('submit', async (event) => {
   }
 });
 
+function showCatalogImportStep(chooseFolder) {
+  catalogEditTitle.textContent = chooseFolder ? 'Добавить базу · 2 из 2' : 'Добавить базу · 1 из 2';
+  catalogEditFields.hidden = chooseFolder;
+  catalogImportFields.hidden = !chooseFolder;
+  catalogImportBack.hidden = !chooseFolder;
+  catalogEditSave.textContent = chooseFolder ? 'Добавить базу' : 'Далее';
+  message(catalogEditMessage);
+  (chooseFolder ? catalogImportFolder : byId('catalog-field-name')).focus();
+}
+
+function selectedJsonFiles() {
+  return Array.from(catalogImportFolder.files).filter(file => /\.json$/i.test(file.name));
+}
+
+catalogImportFolder.addEventListener('change', () => {
+  if (catalogDraft) catalogDraft.importId = undefined;
+  message(catalogEditMessage);
+  const count = selectedJsonFiles().length;
+  catalogImportSelection.textContent = count ? 'Выбрано файлов JSON: ' + numberFormat.format(count) : '';
+  if (catalogImportFolder.files.length && !count) {
+    message(catalogEditMessage, 'В выбранной папке нет файлов .json.', true);
+  }
+});
+
+async function importCatalog(metadata) {
+  const files = selectedJsonFiles();
+  if (!files.length) {
+    message(catalogEditMessage, 'Выберите папку хотя бы с одним файлом .json.', true);
+    catalogImportFolder.focus();
+    return;
+  }
+  const manifest = { metadata, files: files.map(({ name, size }) => ({ name, size })) };
+  const payload = new Blob([JSON.stringify(manifest) + '\n', ...files], { type: 'application/octet-stream' });
+  const { signal } = session;
+  message(catalogEditMessage, 'Загружаем файлы и добавляем базу…');
+  setPending(catalogEditForm, true);
+  try {
+    catalogDraft.importId ??= crypto.randomUUID();
+    const result = await authenticatedRequest('/api/catalog/import', { method: 'POST', data: payload, importId: catalogDraft.importId });
+    if (signal.aborted) return;
+    const { row, rows, files: fileCount, newFields } = result;
+    catalogEditDialog.close();
+    catalogSearch.value = catalogQuery = row.name_table;
+    message(catalogNotice, 'База «' + metadata.name + '» добавлена. Таблица ' + row.name_table + ' (№' + row.id
+      + '). Файлов: ' + numberFormat.format(fileCount) + ', записей: ' + numberFormat.format(rows)
+      + ', новых полей: ' + numberFormat.format(newFields) + '. Для поиска по базе запустите индексацию.');
+    void loadCatalog(1);
+  } catch (error) {
+    if (!signal.aborted) message(catalogEditMessage, error.message, true);
+  } finally {
+    if (!signal.aborted) {
+      setPending(catalogEditForm, false);
+      if (catalogEditDialog.open) catalogEditSave.focus();
+    }
+  }
+}
+
+byId('catalog-create-open').addEventListener('click', () => void openCatalogEditor());
+catalogImportBack.addEventListener('click', () => showCatalogImportStep(false));
 catalogEditCancel.addEventListener('click', () => catalogEditDialog.close());
 catalogEditDialog.addEventListener('cancel', (event) => {
   if (catalogEditForm.dataset.pending === 'true') event.preventDefault();
@@ -1115,11 +1191,21 @@ catalogEditDialog.addEventListener('close', () => {
 catalogEditForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!catalogDraft || catalogEditForm.dataset.pending === 'true') return;
+  if (catalogDraft.create && !catalogImportFields.hidden) {
+    await importCatalog(catalogDraft.metadata);
+    return;
+  }
   const changes = {};
-  for (const field of catalogFields) {
+  const fields = catalogDraft.create ? [...catalogFields, 'access_level'] : catalogFields;
+  for (const field of fields) {
     const input = catalogEditForm.elements.namedItem(field);
-    const value = input.value;
-    if (value === catalogDraft.values[field]) continue;
+    const value = catalogDraft.create ? input.value.trim() : input.value;
+    if (catalogDraft.create && field === 'name' && !value) {
+      message(catalogEditMessage, 'Введите название базы.', true);
+      input.focus();
+      return;
+    }
+    if (catalogDraft.create ? !value : value === catalogDraft.values[field]) continue;
     const tooLong = field === 'info' ? new TextEncoder().encode(value).length > 65_535 : [...value].length > 255;
     if (tooLong) {
       message(catalogEditMessage, field === 'info' ? 'Описание должно занимать не более 65 535 байт.' : 'Сократите значение поля до 255 символов.', true);
@@ -1127,6 +1213,12 @@ catalogEditForm.addEventListener('submit', async (event) => {
       return;
     }
     changes[field] = value === '' ? null : value;
+  }
+  if (catalogDraft.create) {
+    if (JSON.stringify(changes) !== JSON.stringify(catalogDraft.metadata)) catalogDraft.importId = undefined;
+    catalogDraft.metadata = changes;
+    showCatalogImportStep(true);
+    return;
   }
   if (!Object.keys(changes).length) {
     message(catalogEditMessage, 'Изменений нет.');

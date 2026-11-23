@@ -16,7 +16,7 @@ const key = {
   revoked_at: null,
 }
 
-async function fixture(t, { repository = {}, catalogEditor, fieldLabelEditor, now } = {}) {
+async function fixture(t, { repository = {}, catalogEditor, fieldLabelEditor, importCatalog, now } = {}) {
   const calls = []
   const dependencies = {
     async list() { return [{ ...key, apiKey: 'do not expose', key_digest: 'do not expose' }] },
@@ -37,7 +37,7 @@ async function fixture(t, { repository = {}, catalogEditor, fieldLabelEditor, no
     },
     ...repository,
   }
-  const server = http.createServer(createWebAdminHandler({ repository: dependencies, catalogEditor, fieldLabelEditor, passwordHash, now }))
+  const server = http.createServer(createWebAdminHandler({ repository: dependencies, catalogEditor, fieldLabelEditor, importCatalog, passwordHash, now }))
   await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
@@ -252,6 +252,52 @@ test('catalog list, details and edits require an admin session and same-origin m
   assert.deepEqual(await (await request(path)).json(), { row })
   assert.deepEqual(await (await update({ changes })).json(), { row: { ...row, ...changes } })
   assert.deepEqual(calls, [['list', { query: 'А & Б', page: 2 }], ['get', row.id], ['update', row.id, changes]])
+})
+
+test('catalog imports require a session and same origin and stream every selected file', async t => {
+  const files = [
+    { name: 'first.json', data: '{"mail":"one@example.test"}' },
+    { name: 'два.JSON', data: '[{"number":"123456","пометка":"тест"}]' },
+  ]
+  const metadata = { name: 'Тест' }
+  const manifest = { metadata, files: files.map(({ name, data }) => ({ name, size: Buffer.byteLength(data) })) }
+  const body = JSON.stringify(manifest) + '\n' + files.map(({ data }) => data).join('')
+  const url = '/api/catalog/import'
+  const importId = '59659007-53f1-48d2-bd7c-5e4279abcc8a'
+  const header = { 'content-type': 'application/octet-stream', 'x-matrix-import-id': importId }
+  const seen = []
+  const result = { row: { id: '7', name_table: 'generated_table' }, rows: 2, files: 2, newFields: 1 }
+  const { login, request } = await fixture(t, {
+    async importCatalog(received, uploads, token) {
+      assert.deepEqual(received, metadata)
+      assert.equal(token, importId)
+      for await (const file of uploads) {
+        for await (const record of file.records) seen.push([file.name, JSON.parse(record)])
+      }
+      return result
+    },
+  })
+  const post = (content, headers = header) => request(url, { method: 'POST', body: content, headers })
+  assert.equal((await post(body)).status, 401)
+  await login()
+  assert.equal((await post(body, { ...header, origin: 'https://invalid.example' })).status, 403)
+  assert.equal((await request(url)).status, 405)
+  assert.equal((await post(body, { ...header, 'content-type': 'text/plain' })).status, 415)
+  assert.equal((await post(body, { ...header, 'x-matrix-import-id': 'invalid' })).status, 400)
+  assert.equal((await post('invalid')).status, 400)
+  assert.deepEqual(seen, [])
+  const response = await post(body)
+  assert.equal(response.status, 201)
+  assert.deepEqual(await response.json(), result)
+  assert.deepEqual(seen, [['first.json', { mail: 'one@example.test' }], ['два.JSON', { number: '123456', пометка: 'тест' }]])
+})
+
+test('unconfigured import reports the missing source writer without affecting the catalog', async t => {
+  const { request, login } = await fixture(t)
+  await login()
+  const response = await request('/api/catalog/import', { method: 'POST', body: {} })
+  assert.equal(response.status, 503)
+  assert.match((await response.json()).error, /импорт/i)
 })
 
 test('search field labels are listed and edited by exact key through the authenticated admin API', async t => {

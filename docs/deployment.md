@@ -42,11 +42,12 @@ Engine с Compose v2, место под индексы и доступ к исх
 | `manticore` | Поиск по готовым индексам | Без исходных DB-паролей; порты не опубликованы |
 | `indexer` | Профиль `indexing`, явное добавление новых таблиц | SELECT источника, операционный каталог |
 | `catalog-copy` | Профиль `tools`, явное копирование каталога | SELECT источника, INSERT в пустой каталог |
+| `web-admin` | Профиль `admin`, каталог, импорт и управление ключами | Операционная MySQL, TLS, отдельная учётная запись MariaDB для импорта |
 
 `backend` — внутренняя сеть. У API есть отдельная сеть `edge`, необходимая для
-публикации host-порта; исходные credentials в API отсутствуют. Только opt-in задачи
-имеют сеть `source` для маршрута к исходному серверу. Это не заменяет права БД:
-исходный пользователь должен иметь только SELECT на нужные таблицы.
+публикации host-порта. К сети `source` подключены индексатор, задача копирования
+каталога и веб-админка. Для индексации и копирования достаточно SELECT.
+Для импорта через админку настройте отдельную учётную запись с правом записи.
 Задайте реальный адрес в обязательной переменной `SOURCE_MYSQL_HOST`, а имя БД —
 в `SOURCE_MYSQL_DATABASE`. `source-db` и `source_data` в примере являются заменителями.
 Не используйте `127.0.0.1` для базы на другом хосте.
@@ -328,6 +329,58 @@ API. Новые конфигурации Manticore исключают запис
 и блокирует добавление прежних названий объединённых типов. Миграция `012`
 заполняет справочник типами из существующего каталога.
 
+#### Импорт базы из папки на компьютере
+
+В «Каталоге баз» нажмите «Добавить базу», заполните название и нужные поля
+карточки. На следующем шаге выберите локальную папку. Браузер передаст файлы
+`.json` из неё и её подпапок. Каждый файл должен содержать один объект JSON
+или непустой массив объектов в UTF-8. Пример с дополнительным полем:
+
+```json
+[
+  {"mail": "reader@example.test", "отдел": "Архив"},
+  {"number": "0001234567", "отдел": "Редакция"}
+]
+```
+
+В каждом файле хотя бы одна запись должна содержать заполненное поисковое поле
+верхнего уровня. Поддерживаются `number`, `mail`, `fio`, `date_of_birth`,
+`telegram`, `vk`, `facebook`, `snils`, `inn`, `passport`, `imei`, `imsi`,
+`grz` и `vin`. Регистр ключей имеет значение. Для номеров с ведущими нулями
+используйте JSON-строки. Неизвестные ключи верхнего уровня появятся в «Полях
+поиска» с исходными именами. Там можно изменить их подписи в результатах.
+
+Сервер создаёт в MariaDB исходную таблицу с уникальным именем и сохраняет
+в ней записи. Карточка базы, количество записей, флаги поиска и новые подписи
+публикуются после проверки всей папки. Неверный файл можно исправить и повторить
+загрузку. За один импорт принимается до 4096 файлов общим объёмом до 64 ГиБ.
+Одна запись может занимать до 4 МиБ, имя поля — до 64 символов.
+После добавления базы запустите `matrix_compose run --rm indexer` для поиска по
+новым записям.
+
+Если связь оборвалась во время публикации, проверьте сгенерированное имя таблицы
+в «Каталоге баз». После аварийной остановки процесса в MariaDB может остаться
+незавершённая таблица. Перед её удалением сверьте имя с `data_base` и опубликованным
+каталогом индекса и убедитесь, что импорт уже завершился.
+
+Для включения импорта укажите `MATRIX_WEB_ADMIN_IMPORT_USER` в `runtime.env`
+и сохраните пароль этого пользователя в `import/db-password` внутри
+`MATRIX_WEB_ADMIN_SECRETS_DIR`. Адрес, порт и схема источника берутся из
+`SOURCE_MYSQL_HOST`, `SOURCE_MYSQL_PORT` и `SOURCE_MYSQL_DATABASE`.
+Выполните на исходной MariaDB, подставив имя схемы и пользователя своей установки:
+
+```sql
+CREATE USER 'matrix_import'@'%' IDENTIFIED BY 'replace-with-import-password';
+GRANT CREATE, INSERT, DROP ON source_data.* TO 'matrix_import'@'%';
+```
+
+Эти права действуют на всю указанную схему. Веб-админка использует DROP для
+отката созданной ею таблицы при ошибке загрузки. Индексатору нужен SELECT
+на добавляемые таблицы. Выдайте права на операционной MySQL из примера ниже,
+пересоберите образы `web-admin`, `api` и `indexer` и обновите контейнеры
+`web-admin` и `api`. Обновлённый API сохраняет все цифры числовых идентификаторов
+из JSON при выдаче результатов.
+
 Во внешнем `runtime.env` задайте `MATRIX_WEB_ADMIN_SECRETS_DIR` с абсолютным путём
 к закрытому каталогу, `MATRIX_WEB_ADMIN_DB_USER` с именем пользователя MySQL и,
 при необходимости, `MATRIX_WEB_ADMIN_TLS_DIR` с каталогом сертификатов. Внутри
@@ -350,11 +403,15 @@ GRANT SELECT (id, label, created_at, activated_at, revoked_at),
       ON matrix.access_keys TO 'matrix_web_admin'@'%';
 GRANT SELECT ON matrix.access_key_logs TO 'matrix_web_admin'@'%';
 GRANT SELECT (id, name_table, name, info, relevance_date, country, type, trust),
+      INSERT (id, name_table, name, info, relevance_date, country, access_level, type, trust,
+              `count`, search_mail, search_fio, search_number, search_telegram,
+              search_passport, search_snils, search_inn, search_imei, search_imsi,
+              search_facebook, search_vk, search_grz, search_vin, created_at, updated_at),
       UPDATE (name, info, relevance_date, country, type, trust)
       ON matrix.data_base TO 'matrix_web_admin'@'%';
 GRANT SELECT (name, alias_for), INSERT (name)
       ON matrix.catalog_types TO 'matrix_web_admin'@'%';
-GRANT SELECT (field_key, label), UPDATE (label)
+GRANT SELECT (field_key, label), INSERT (field_key, label), UPDATE (label)
       ON matrix.search_field_labels TO 'matrix_web_admin'@'%';
 ```
 
@@ -376,7 +433,7 @@ printf '%s' "$web_admin_password" | docker run --rm -i matrix-web-admin:local \
 unset web_admin_password
 ```
 
-Перед запуском проверьте права обоих файлов и каталога. В обычном Docker на
+Перед запуском проверьте права файлов и каталога. В обычном Docker на
 Linux можно выдать право чтения группе пользователя `node` внутри контейнера.
 
 ```bash
@@ -385,6 +442,11 @@ sudo chgrp "$web_admin_gid" "$MATRIX_WEB_ADMIN_SECRETS_DIR" \
   "$MATRIX_WEB_ADMIN_SECRETS_DIR/db-password" "$MATRIX_WEB_ADMIN_SECRETS_DIR/password.hash"
 sudo chmod 0750 "$MATRIX_WEB_ADMIN_SECRETS_DIR"
 sudo chmod 0640 "$MATRIX_WEB_ADMIN_SECRETS_DIR/db-password" "$MATRIX_WEB_ADMIN_SECRETS_DIR/password.hash"
+if [ -f "$MATRIX_WEB_ADMIN_SECRETS_DIR/import/db-password" ]; then
+  sudo chgrp "$web_admin_gid" "$MATRIX_WEB_ADMIN_SECRETS_DIR/import" "$MATRIX_WEB_ADMIN_SECRETS_DIR/import/db-password"
+  sudo chmod 0750 "$MATRIX_WEB_ADMIN_SECRETS_DIR/import"
+  sudo chmod 0640 "$MATRIX_WEB_ADMIN_SECRETS_DIR/import/db-password"
+fi
 matrix_compose --profile admin up -d --no-deps web-admin
 ```
 

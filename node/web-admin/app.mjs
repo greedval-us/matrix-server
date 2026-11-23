@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { createLoginLimiter, createSessions, isPasswordHash, isValidPassword, verifyPassword } from './auth.mjs'
+import { CatalogImportError } from './catalog-import.mjs'
+import { CatalogUploadError, readImportUpload } from './import-upload.mjs'
 
 const files = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -57,10 +59,15 @@ async function readJson(request, property, limit = maxBody) {
   if (Number(request.headers['content-length']) > limit) throw tooLarge()
   let size = 0
   const chunks = []
-  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
-    size += chunk.length
-    if (size > limit) throw tooLarge()
-    chunks.push(chunk)
+  const deadline = setTimeout(() => request.destroy(), 15_000).unref()
+  try {
+    for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+      size += chunk.length
+      if (size > limit) throw tooLarge()
+      chunks.push(chunk)
+    }
+  } finally {
+    clearTimeout(deadline)
   }
   let value
   try { value = JSON.parse(Buffer.concat(chunks, size).toString('utf8')) }
@@ -152,16 +159,22 @@ function logMetadata({ id, access_key_id, label, module, method, status_code, du
 
 function publicError(error) {
   if (error instanceof HttpError) return error
+  if (error instanceof CatalogUploadError) return new HttpError(error.status, error.message)
+  if (error instanceof CatalogImportError) {
+    return new HttpError(({ 3: 400, 6: 409, 8: 413, 9: 503, 14: 503 })[error.code] ?? 500, error.message)
+  }
   if (error?.code === 3) return invalidBody()
   if (error?.code === 5) return new HttpError(404, 'Запись каталога не найдена.')
+  if (error?.code === 9) return new HttpError(409, 'Не удалось подтвердить свободный идентификатор базы. Проверьте опубликованный каталог индекса.')
   if (error?.code === 14) return new HttpError(503, 'База данных временно недоступна.')
   return new HttpError(500, 'Не удалось выполнить запрос.')
 }
 
-export function createWebAdminHandler({ repository, catalogEditor, fieldLabelEditor, passwordHash, now = Date.now }) {
+export function createWebAdminHandler({ repository, catalogEditor, fieldLabelEditor, importCatalog, passwordHash, now = Date.now }) {
   if (!isPasswordHash(passwordHash)) throw new Error('Invalid web admin password hash')
   const sessions = createSessions(now)
   const reserveLogin = createLoginLimiter(now)
+  let importing = false
 
   async function session(request, response) {
     const cookie = request.headers.cookie
@@ -226,6 +239,21 @@ export function createWebAdminHandler({ repository, catalogEditor, fieldLabelEdi
 
   async function catalog(request, response, path, query) {
     const { method } = request
+    if (path === '/api/catalog/import') {
+      if (method !== 'POST') throw new HttpError(405, 'Метод запроса недоступен.')
+      readFilters(query, [])
+      if (!importCatalog) throw new HttpError(503, 'Для импорта требуется настроить запись в базу источника.')
+      if (importing) throw new HttpError(409, 'Уже выполняется импорт. Дождитесь его завершения.')
+      const importId = request.headers['x-matrix-import-id']
+      if (typeof importId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(importId)) throw invalidBody()
+      importing = true
+      try {
+        const { metadata, files } = await readImportUpload(request)
+        return json(response, 201, await importCatalog(metadata, files, importId))
+      } finally {
+        importing = false
+      }
+    }
     if (path === '/api/catalog/types') {
       readFilters(query, [])
       if (method === 'GET') return json(response, 200, { types: await catalogEditor.listTypes() })

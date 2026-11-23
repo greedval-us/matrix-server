@@ -8,6 +8,8 @@ import { OperationalRepository } from '../infrastructure/mysql/repository.mjs'
 import { createWebAdminHandler } from './app.mjs'
 import { createCatalogEditor } from './catalog.mjs'
 import { createFieldLabelEditor } from './field-labels.mjs'
+import { createCatalogImporter } from './catalog-import.mjs'
+import { createCatalogGuard } from '../modules/catalog/guard.mjs'
 
 function configuredNetworks(value) {
   if (!value.trim()) return null
@@ -43,6 +45,8 @@ async function main() {
   ])
 
   const pool = createMysqlPool(readMysqlSettings())
+  const sourcePool = e.IMPORT_MYSQL_USER?.trim() ? createMysqlPool(readMysqlSettings(e, 'IMPORT_MYSQL')) : null
+  const closePools = () => Promise.all([pool.end(), sourcePool?.end()])
   pool.on('connection', connection => connection.query("SET time_zone = '+00:00'", error => {
     if (error) connection.destroy()
   }))
@@ -72,9 +76,13 @@ async function main() {
     const operations = new OperationalRepository(pool)
     const catalogEditor = createCatalogEditor(operations)
     const fieldLabelEditor = createFieldLabelEditor(operations)
-    const handler = createWebAdminHandler({ repository, catalogEditor, fieldLabelEditor, passwordHash: passwordHash.trim() })
-    const server = createServer({ cert, key, minVersion: 'TLSv1.2', requestTimeout: 15_000,
+    const importCatalog = sourcePool && createCatalogImporter({
+      pool, sourcePool, catalogGuard: createCatalogGuard(e.MATRIX_DATABASE_CATALOG ?? 'data/state/database-catalog.json'),
+    })
+    const handler = createWebAdminHandler({ repository, catalogEditor, fieldLabelEditor, importCatalog, passwordHash: passwordHash.trim() })
+    const server = createServer({ cert, key, minVersion: 'TLSv1.2', requestTimeout: 6 * 60 * 60 * 1000,
       headersTimeout: 10_000, keepAliveTimeout: 5000, maxHeaderSize: 8192 }, handler)
+    server.setTimeout(120_000)
     if (networks) server.on('connection', socket => {
       const address = socket.remoteAddress ?? ''
       const version = isIP(address)
@@ -94,13 +102,13 @@ async function main() {
       timeout.unref()
       server.close(() => {
         clearTimeout(timeout)
-        void pool.end().catch(() => { process.exitCode = 1 })
+        void closePools().catch(() => { process.exitCode = 1 })
       })
     }
     process.on('SIGINT', close)
     process.on('SIGTERM', close)
   } catch (error) {
-    await pool.end()
+    await closePools()
     throw error
   }
 }
